@@ -27,7 +27,7 @@
                "cpan/perl5/lib/perl5/IPC/Run/Win32Helper.pm",
                "cpan/perl5/lib/perl5/IPC/Run/Win32Process.pm",
                "cpan/perl5/lib/perl5/IPC/Run/Timer.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32IO..pm",
+               "cpan/perl5/lib/perl5/IPC/Run/Win32IO.pm",
                "cpan/perl5/lib/perl5/IPC/Run/Win32Pump.pm" ],
             "__perllib__/MIME" : [
                "cpan/perl5/lib/perl5/MIME/Types.pm",
@@ -57,7 +57,7 @@
          },
          "WARNING": "only bin/ and lib/ are included by default in the /zip overlay so list here the extra root files and folders used",
          "XS": "for XS modules, 1) add the module to poe and prf below 2) add both .xs C code and perl .pm to xs/",
-         "+perl_onlyextensions" : ["IO::Tty", "Devel::Gladiator", "IO::Interface::Simple"],
+         "perl_onlyextensions" : ["IO::Tty", "Devel::Gladiator", "IO::Interface::Simple"],
          "perl_repo_files" : {
              "ext/IO::Tty" : ["xs/Tty.xs", "xs/IO/Tty.pm"],
              "ext/IO::Interface::Simple" : ["xs/Interface.xs", "IO/Interface/Simple.pm", "./IO/Interface.pm"],
