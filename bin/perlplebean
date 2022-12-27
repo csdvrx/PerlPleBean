@@ -1,0 +1,2044 @@
+#!/usr/bin/perl
+use strict;
+# To relax strict for references
+#no strict "refs";
+use warnings;
+# To relax warnings for redefine
+#no warnings 'redefine';
+# To convert the error message into explanations
+#use diagnostics;
+{
+ package PerlPleBean;
+
+ # For checking the OS, because $OSNAME doesn't work in APPerl
+ use Config;
+ # For the basic http server
+ use HTTP::Server::Simple::CGI;
+ use base qw(HTTP::Server::Simple::CGI);
+ # For file uploads mostly, but CGI is deprecated
+ use CGI qw(upload param);
+ # TODO Either use CGI::Emulate::PSGI and keep all this CGI stuff
+ # or manually handle uploads without CGI at all (should be fun!)
+ # like with LWP::Request::Common and $DYNAMIC_FILE_UPLOAD
+ # or https://metacpan.org/release/CHANSEN/HTTP-MultiPartParser-0.02/
+ # could also use something like a plain HTTP::Server::Simple
+ # after refactoring (otherwise fails with `do not call PerlPleBean::SUPER->handler`)
+ # Maybe write a test suite using curl+tcpdump cf
+ # http://www.iandennismiller.com/posts/curl-http1-1-100-continue-and-multipartform-data-post.html
+ # For converting epochs to http dates
+ use HTTP::Date qw(time2str);
+ # For mime times, instead of doing that manually with a hash of file extensions
+ use MIME::Types qw(by_suffix);
+ # For print based debugging
+ use Data::Dumper qw(Dumper);
+ # For getting the current working directory, used as a prefix in non APE/debug mode
+ use Cwd qw(cwd);
+ # For checking if a filehandle is still open
+ use Scalar::Util qw(openhandle);
+ # For the eventual decoding
+ use MIME::Base64 qw(decode_base64);
+ # For executing cgi
+ use IPC::Run qw(timeout);
+
+ ## XS support added?
+
+ # It requires recompiling cosmopolitan
+ my $xs_added=0;
+ if ($xs_added>0) {
+  use Devel::Gladiator qw(arena_table);      # For precise sizes
+  use IO::Interface::Simple qw (interfaces); # For listing interfaces
+ } # if xs_added
+
+ ## Global variables
+
+ # Server name and version for HTTP replies
+ my $server="PerlPleBean/1.0";
+ if (defined($Config{osname})) {
+  $server .=  " (" . $Config{osname} . ")";
+ }
+ if (defined($Config{archname})) {
+  $server .=  " [" . $Config{archname} . "]";
+ }
+ $server .= " from $0";
+
+ # Content will be served from:
+ #  1) Normal served_dirs
+ #  They can be local (will add $cwd prefix during tests) or embedded in the APE (will add /zip prefix) 
+ #  They do not include the CGIs from ./bin, always allowed by the /bin/ post_handlers_wildcard
+ my %served_dirs= ('html' => "site assets", 'tsv' => "demo files");
+ #  2) Files transparently redirected
+ #  Useful for files you want to point to an asset inside one of the served_dirs
+ #  WONTFIX: there's no %served_files, so /html/favicon.ico can't be served if /html is not in served_dirs
+ my %served_links=('/favicon.ico' => "/html/favicon.ico");
+ #  3) Local content, which you want to always be local, which can create some risks
+ #  With normal directories
+ my %served_local=(
+  # Let's use a simple convention: only /// means /, any other count means ./
+  # So // means ./, and //// ///// ////// etc. also mean ./
+  # Good because dots in urls are eaten at least by chrome-based browsers:
+  # For simple dots //./ => //, likewise for double dots: //etc/X11/../ => //etc/ => ./etc
+  # As the rule will be applied by a recursive regex, it favor of security:
+  # Only ///etc will serve etc, while etc /etc //etc ////etc /////etc etc will only serve ./etc
+  '//Makefile' => ['./Makefile', "recreate everything"],
+  '//src' => ['./src', "source binaries"],
+  # If you have /src with confidential sourcecode, this will expose it
+  '///src' => ['/src',  "small security risk"],
+ );
+ # And with wildcards allowing anything found behind them
+ my %served_local_wildcard=(
+  # ./ will expose all the files in the same directory as perplebin
+  '//' => ['./', "security risk"],
+  # You should not do that, as it will expose /etc /etc/passwd /etc/shadow etc
+  '///' => ['/',  "worst security risk"],
+ );
+
+ # TODO: add /live to add new handlers live, change $debug level and see the @debug_msg
+ # Handle magic addresses in the spirit of CGI:
+ #  With subroutines, but in a way that passes strict refs
+ my %post_handlers = (
+ #'/form'       => {'name' => "p_form"}, # TODO For completionism only, not super fun or complicated
+  '/mem/add.cgi'=> {'name' => "p_mem_add_cgi",'code'=>\&p_mem_add_cgi},  # Last CGI part
+  '/mem/upload' => {'name' => "p_mem_upload", 'code'=>\&p_mem_upload},   # TODO: WIP, future replacement
+ );
+ my %get_handlers = (
+ #'/forms'      => {'name' => "g_forms"}, # TODO For completionism only, not super fun or complicated
+  '/mem/add.cgi'=> {'name' => "g_mem_add_cgi",'code'=>\&g_mem_add_cgi},  # not really cgi, frontend for p_mem_add_cgi
+  '/upload'     => {'name' => "g_upload",     'code'=>\&g_upload},       # for the WIP, frontend using p_mem_upload
+  '/mem/'       => {'name' => "g_mem",        'code'=>\&g_mem},          # list content from %mem, add with upload
+  '/mem'        => {'name' => "g_mem",        'code'=>\&g_mem},          # list content from %mem, add with upload
+  '/'           => {'name' => "g_slash",      'code'=>\&g_slash},        # the site index
+ );
+ # Populated by handlers that are triggered on partial name match
+ my %post_handlers_wildcard = (
+  '/bin/'       => {'name' => "p_bin_ipc",    'code'=>\&p_bin_ipc},      # the trailing slash catches /mem/delete/*
+ );
+ my %get_handlers_wildcard = (
+  '/env'        => {'name' => "g_env",        'code'=>\&g_env},          # shows the IP, environment variables and params
+  '/mem/del/'   => {'name' => "g_mem_del",    'code'=>\&g_mem_del},      # the trailing slash catches /mem/delete/*
+ );
+
+ # Array of Hashes where parameters will go, in order of submission, to help debugging
+ #  TODO: could be a hash with epoch as the key
+ my @par;
+ #  TODO GET & POST: $ENV{CONTENT_TYPE}: application/x-www-form-urlencodeda or undef
+ # Hash where uploaded files will be stored
+ #  by HTTP POST: $ENV{CONTENT_TYPE}: application/x-www-form-urlencoded
+ # Must handle boundaries, filenames, HTTP/1.1 100 Continue etc 
+ #  like: last PART if /\A--$boundary--\Z/;
+ #  like: next PART if /\A--$boundary\x0D\x0A\Z/;
+ # Also cf example in https://www.perlmonks.org/?node_id=163897
+ # or https://www.tek-tips.com/viewthread.cfm?qid=159469
+ # TODO Make that a nested HoH to support directory-like structures, and initialization from a pickle file
+ my %mem;
+ # Time of the last upload: start with the current time, update later
+ my $mem_last=time;
+ # File ending with .template.html can include data from the %mem hash
+ my %template= (
+   # For example, if _-BUTTONSTSV-_ is found, add all the tsv files:
+   # the _-file-_ strings in the replacement string below
+   # will be replaced by paths to the actual file in /mem
+   # and _-BUTTONSTSV-_ will be replaced html code to each of the actual files
+  'BUTTONSTSV' => {
+   'default' => "(nothing yet)",
+   'type' => 'file',
+   'file' => {
+    'extension' => "tsv",
+    'replacement' => "<div class=\"rFile\" id=\"_-file-_\"><input type=\"submit\" value=\"/mem/_-file-_\" textContent=\"_-file-_\" class=\"import\" onclick=\"htmlssheet_loadremote(this.value);\" /><a href=\"/mem/del/_-file-_\" onclick=\"filebutton_hide(\'_-file-_\');\">x</a></div>",
+   }
+  }
+ );
+
+ # Carriage Return aka CR because HTTP headers should use CRLF
+ # cf https://www.rfc-editor.org/old/EOLstory.txt and:
+ # https://www.w3.org/Protocols/rfc2616/rfc2616-sec5.html
+ # https://www.w3.org/Protocols/rfc2616/rfc2616-sec6.html
+ my $ctrlr="\r";
+ # The current working directory, for prepending to served_dirs when not using cosmopolitan
+ my $cwd = cwd;
+ # To enable debug output to STDERR
+ my $debug;
+
+ ## Routines
+
+ # Deduplicate an array
+ sub unique {
+  my %seen;
+  grep !$seen{$_}++, @_;
+ } # unique
+
+ # Flatten an array
+ sub flat(@) {
+  return map { ref eq 'ARRAY' ? @$_ : $_ } @_;
+ } # flat
+
+ # Count the occurences of a character in a string
+ sub count_occurrence{
+  my ($str, $char) = @_;
+  my @ar=split( $str, $char);
+  my $nbr=scalar(@ar)-1;
+  return ($nbr);
+ }
+
+ # print to stderr if the debug level is sufficient
+ sub debug(@) {
+   # FIXME: also save to %log, will be helpful mostly in cosmo mode
+   my ($threshold, $message)=@_;
+   if (defined($message)) {
+    unless ($threshold>$debug) { print STDERR "$message\n" };
+   } else { # if
+    print STDERR "Error with debug() call by " . caller(1);
+   } # if
+ } # debug
+
+ ## Initialization
+
+ # For a quick and dirty way to detect if within APPerl
+ my $cosmo;
+ if ($Config{osname} =~ m/^cosmo/ || $Config{archname} =~ m/cosmo$/) {
+  # Executing within cosmopolitan APPerl, so disabling debug
+  $cosmo=1;
+  $debug=0;
+ } else {
+  $cosmo=0;
+  $debug=1;
+  # Not executing within cosmopolitan APPerl, so enabling debug
+  debug (0, "POST handlers:");
+  foreach my $h (sort keys(%post_handlers)) {
+   my $msg=sprintf ("\t%-*s -> sub %s\(\)", 15, $h, $post_handlers{$h}{name});
+   debug (0, $msg);
+  } # foreach h
+  debug (0, "POST handlers with partial match allowed:");
+  foreach my $h (sort keys(%post_handlers_wildcard)) {
+   my $msg=sprintf ("\t%-*s -> sub %s\(\)", 15, $h, $post_handlers_wildcard{$h}{name});
+   debug (0, $msg);
+  } # foreach h
+  debug (0, "GET handlers:");
+  foreach my $h (sort keys(%get_handlers)) {
+   my $msg=sprintf ("\t%-*s -> sub %s\(\)", 15, $h, $get_handlers{$h}{name});
+   debug (0, $msg);
+  } # foreach h
+  debug (0, "GET handlers with partial match allowed:");
+  foreach my $h (sort keys(%get_handlers_wildcard)) {
+   my $msg=sprintf ("\t%-*s -> sub %s\(\)", 15, $h, $get_handlers_wildcard{$h}{name});
+   debug (0, $msg);
+  } # foreach h
+  my $exposed;
+  foreach my $d (sort keys(%served_dirs)) {
+   $exposed .= "$served_dirs{$d} $d, ";
+  }
+  debug (0, "Exposing local directories: $exposed");
+  my $d_prefix;
+  if ($cosmo == 1) {
+   $d_prefix="$0/zip/";
+  } else { # if cosmo
+   # In debug mode, append the current working directory
+   $d_prefix="$cwd/";
+  }
+  foreach my $d (sort keys(%served_dirs)) {
+   my $msg= sprintf("\t%-*s", 15, "/" . $d);
+   $msg .= sprintf("=> %s", $d_prefix . $d . "/");
+   debug (0, $msg);
+  }
+  debug (0, "And also filed linked to content there:");
+  foreach my $l (sort keys(%served_links)) {
+   my $msg=sprintf("\t%-*s => %s", 15, $l, $served_links{$l});
+   debug (0, $msg);
+  }
+ } # if cosmo
+  # this sort the keys by their values
+  my $exposel;
+  foreach my $d (sort keys(%served_local)) {
+   $exposel.="$d $served_local{$d}[1], ";
+  }
+  $exposel =~ s/\/{3}/\//g;    # /// precisely =>  /
+  $exposel =~ s/\/{2}/\.\//g;  # //  precisely => ./
+  debug (0, "Local files and directories exposed: $exposel");
+  foreach my $d (sort keys(%served_local)) {
+   my $msg=sprintf("\t%-*s", 15, $d);
+   my $target=$served_local{$d}[0];
+   # to be clear as to what ./ means
+   if ($target =~ m/^\.\/$/) {
+    $target=$cwd;
+   }
+   $msg .= "=> $target";
+   debug (0, $msg);
+  }
+  # this sort the keys by their values
+  my $exposew;
+  foreach my $d (sort keys(%served_local_wildcard)) {
+   $exposew .= "$d $served_local_wildcard{$d}[1], ";
+  }
+  debug (0, "Also those with partial match on: $exposew");
+  foreach my $d (sort keys(%served_local_wildcard)) {
+   my $msg=sprintf("\t%-*s", 15, $d);
+   my $target=$served_local_wildcard{$d}[0];
+   # to be clear as to what ./ means
+   if ($target =~ m/^\.\/$/) {
+    $target=$cwd;
+   }
+   $msg .= "=> $target";
+   debug (0, $msg);
+  }
+
+ ## Signals handling
+
+ # Memory persistance upon interrupt
+ $SIG{'INT'} = sub {
+  use Storable qw(lock_nstore);
+  debug (-1, "\nSaving memory %mem to mem.bin");
+  lock_nstore \%mem, 'mem.bin';
+  use Carp qw/confess/;                 # For outputs, then dies
+  Carp::confess ("Caught SIGINT");
+ }; # INT
+
+ # Memory information
+ $SIG{'USR2'} = sub {
+  # ps xwau |grep usr.bin.perl |grep perlpl  |awk '{ print $2 }' | xargs  kill -USR2
+  local $^W=0; # disable warnings in this block
+  use Carp qw/cluck/;                   # For outputs like confess, but keep running
+ # TODO: improve like https://stackoverflow.com/questions/18398692/how-can-i-adjust-the-rendering-of-objects-in-a-longmess
+ # use overload '""' => sub {
+ #  my $self = shift;
+ #  if (defined ($self)) {
+ #   return sprintf '%s[%s]', ref $self, join ", ", @$self;
+ #  }
+ # };
+ # Or just do the /live idea, starting with poke and peek.
+  debug (-1, "Received USR2, showing stats");
+  my $msg=cluck("Code path:");
+  debug (0, $msg);
+  debug (0, "\n\t\%mem:");
+  foreach my $f (sort { $mem{$a}{"size"} <=> $mem{$b}{"size"} } keys (%mem)) {
+   debug (1, "$f: $mem{$f}{size} bytes");
+  } # foreach
+  debug (0, "\n\t\@par:");
+  $msg=Dumper (@par);
+  debug (0, $msg);
+  if ($xs_added >0) {
+   use Devel::Gladiator qw(arena_table); # For precise sizes
+   my %at;
+   my $at_total=0;
+   my $at_string=arena_table();
+   my @at_lines=split ('\n', $at_string);
+   foreach my $at_line (@at_lines) {
+    my ($val, $key)=split (' ', $at_line);
+    if ($val =~ m/^[0-9]*$/) {
+     $at{$key}=$val;
+     $at_total=$at_total+$val;
+    } # if val
+   } # foreach at_line
+   debug (1, "\n\tarena_tables:");
+   foreach my $k (sort { $at{$b} <=> $at{$a} } keys (%at)) {
+    $msg=sprintf ("%-*s %s bytes", 30, $k, $at{$k});
+    debug (1, $msg);
+   } # foreach
+   my $at_total_mb=$at_total/1024;
+   $msg=sprintf("\nAbout %.2f Mb memory used in total", $at_total/1024);
+   debug (0, $msg);
+  } # if xs_added
+ };
+
+ # WARN causes cluck
+ local $SIG{__WARN__} = \&Carp::cluck;
+
+ ## Dispatcher to HTTP related routines
+
+ # This "handle_request" name is a magic name expected by HTTP::Server::Simple::CGI
+ sub handle_request {
+  my $method = $ENV{REQUEST_METHOD};
+  my $uri = $ENV{REQUEST_URI};
+
+  if ($method = m/POST/i) {
+   debug (0, "Method POST $uri");
+   if (defined ($post_handlers{$uri}{name})) {
+    # Direct match get first dips
+    if (ref($post_handlers{$uri}{code}) eq "CODE") {
+     debug (0, "Handling $uri with sub $post_handlers{$uri}{name} ()");
+     &{$post_handlers{$uri}{code}};
+    } else { # if code
+     do_error (404, $uri, "undefined");
+     close (STDOUT);
+     return;
+    } # if code
+   } else { # if handler
+    if (grep ($uri,keys(%post_handlers_wildcard))) {
+     # Wildcards get sloppy seconds
+     foreach my $wildcard (keys(%post_handlers_wildcard)) {
+      if ($uri =~ m/^$wildcard/) {
+       debug (0, "Handling $uri with wildcard sub $post_handlers_wildcard{$wildcard}{name} ()");
+       &{$post_handlers_wildcard{$wildcard}{code}};
+       return;
+      } # if
+     } # foreach
+    } else { # if grep
+     do_error (404, $uri, "missing code");
+     close (STDOUT);
+     return;
+    } # if grep
+   } # if handler
+  } elsif ($method = m/GET/i) {
+   debug (0, "Method GET $uri");
+   # First check if there's a handle to serve it
+   if (defined ($get_handlers{$uri}{name})) {
+    # Direct match get first dips
+    if (ref($get_handlers{$uri}{code}) eq "CODE") {
+     debug (0, "Handling $uri with sub $get_handlers{$uri}{name} ()");
+     &{$get_handlers{$uri}{code}};
+    } else { # if code
+     do_error (404, $uri, "missing code");
+     close (STDOUT);
+     return;
+    } # if code
+   } else { # if handler
+    if (grep ($uri,keys(%get_handlers_wildcard))) {
+     # Wildcards get sloppy seconds
+     foreach my $wildcard (keys(%get_handlers_wildcard)) {
+      if ($uri =~ m/^$wildcard/) {
+       debug (0, "Handling $uri with wildcard sub $get_handlers_wildcard{$wildcard}{name} ()");
+       &{$get_handlers_wildcard{$wildcard}{code}};
+       return;
+      } # if uri match wildcard 
+     } # if foreach
+    } # if grep
+    # Last resort is to try to serve it as file: will do as needed 200 OK, or upon failure 404 or 403
+    # But inside uri, we can have things like: /html, html, /etc, /etc/passwd / //
+    # TODO: and shenanighans based on ASCII or Unicode abuse, but good security isn't a goal (yet?)
+    # So the uri it transformed following a convention which favors security
+    my $convention = $uri;
+    # Remove the trailing slash if present in front of text
+    $convention =~s/!(\/)+\/$//;
+    # But precisely 1, 2 and 3 slashes will remain as is
+    $convention =~ s/\/{4,}/\/\//g; # //// or more means // leading to ./
+    # This way, try_serve can differentiate in cosmo mode:
+    # /html   will be served from /zip/html
+    # //html  will be served from ./html of say C:\tests\perlplebean\html
+    #         (if perlplebean.com is in C:\tests\perlplebean\)
+    # ///html will be served from C:\html\
+    # While in debug mode:
+    # /html   will be served from ./html
+    # //html  will be served from ./html as well
+    # ///html will be served from /html
+    #
+    # So let's see what is allowed to be passed to try_serve
+    my $future=$convention;
+    # Not done here, just FYI in the debug messages
+    $future=~ s/\/{3}/\//g;    # /// precisely =>  /
+    $future=~ s/\/{2}/\.\//g;  # //  precisely => ./
+    # remove the query parameters
+    # it should only be applied to .html? .cgi? and a few other cases like this
+    # otherwise, question marks in files or directories would break things
+    $future=~s/(\.html|\.cgi)\?.*/$1/g;
+
+    # try_serve will remove:
+    #  - trailing / for directories like /html/
+    #  - trailing ? for html-like file such as file.html?parameter=value or script.cgi?do=this
+    # then try_serve will assume it must have been allowed to reach it
+    # and therefore will try to serve anything:
+    #  - /mem files from %mem
+    #  - for anything else:
+    #    - prefixed with /zip if in cosmo mode
+    #    - prefixed with the current directory otherwise
+    #
+    # so we have to figure what shouldn't be allowed to reach try_serve
+ 
+    # Should apply the served_link rules first, to see if they resolve to something authorized
+    # So start with the transparent redirections
+    if (defined($served_links{$convention})) {
+     $convention=$served_links{$convention};
+    }
+    debug (0, "From url to file: $uri =rules=> $convention =paths=> $future");
+
+    # This looks like a goto but acts more like a break
+    # Better as it's not limited to a loop
+    # So it helps with the readability of the complicated if-logic
+    EXIT_AS_AUTHORIZED: {
+     if ($convention =~ m/[\/]?mem/) {
+       # /mem is implicitely authorized
+       last EXIT_AS_AUTHORIZED;
+     }
+     foreach my $l (keys %served_local_wildcard) {
+      debug (2, "Checking $convention against $l");
+      unless ($convention =~ m/^$l/) {
+       # no wildcard match, but there's another chance
+       foreach my $m (keys %served_local) {
+        debug (2, "Checking partial $convention against $m");
+        unless ($convention =~ m/^$m$/) {
+         # see if it matches the %served_dirs or %served_links
+         my @convention_el=split('/', $convention);
+         my $conlvl0=$convention_el[0]; # => both cases, check against served_dirs
+         my $conlvl1=$convention_el[1]; # => check against served_local*
+         # if conlvl2 undef, like ///html so /html
+         my $conlvl2=$convention_el[2]; # => same
+         my $conlvl3=$convention_el[3]; # => same
+         if (defined($conlvl0) and defined($served_dirs{$conlvl0})) {
+          # simplest: if conlvl0 defined, the uri will be like html/
+          debug (0, "Requested uri ($uri in convention) $convention matches %served_dirs $conlvl0 at l0 (" . $served_dirs{$conlvl0} . ")");
+          last EXIT_AS_AUTHORIZED;
+         } else { # if def conlvl
+          # if conlvl0 undef, be like /html/ so html/: so check again
+          if (defined($conlvl1) and defined($served_dirs{$conlvl1})) {
+           debug (0, "Requested uri ($uri in convention) matches %served_dirs $conlvl1 at l1 (" . $served_dirs{$conlvl1} . ")");
+           last EXIT_AS_AUTHORIZED;
+          } else { # if def conlvl1
+           # if conlvl1 undef, like //html so ./html
+           if (defined($conlvl2)) {
+            if (defined($served_local{$conlvl2})) {
+             debug (0, "Requested uri ($uri in convention) matches %served_local $conlvl2 at l2 (" . $served_local{$conlvl2} . ")");
+             last EXIT_AS_AUTHORIZED;
+            } else { # served_local{$conlvl2}
+             # also check the wildcard
+             foreach my $w (keys %served_local_wildcard) {
+               if ($convention =~ m/^$w/) {
+                debug (0, "Requested uri ($uri in convention) matches %served_local_wildcard $conlvl2 at l2 (" . $served_local{$conlvl2} . ")");
+                last EXIT_AS_AUTHORIZED;
+               } # if uri match
+             } # foreach key served_local_wildcard
+            }  # served_local{$conlvl2}
+           } else { # if def conlvl2
+            if (defined($conlvl3)) {
+             # if conlvl2 undef, like ///html so /html : same as above with conlvl3
+             if (defined($served_local{$conlvl3})) {
+              debug (0, "Requested uri ($uri in convention) matches %served_local $conlvl3 at l2 (" . $served_local{$conlvl3} . ")");
+              last EXIT_AS_AUTHORIZED;
+             } else { # served_local{$conlvl3}
+              # also check the wildcard
+              foreach my $w (keys %served_local_wildcard) {
+                if ($convention =~ m/^$w/) {
+                 debug (0, "Requested uri ($uri in convention) matches %served_local_wildcard $conlvl3 at l2 (" . $served_local{$conlvl3} . ")");
+                 last EXIT_AS_AUTHORIZED;
+                } # if uri match
+              } # foreach key served_local_wildcard
+             }  # served_local{$conlvl3}
+            } # if defined conlvl3
+           } # if def conlvl2
+          } # if def conlvl1
+          do_error(403, $uri, "Refused since $uri means $convention leading to $future\n");
+          return;
+         }
+        } else { # unless served_local match precise
+         debug (0, "Requested $uri precisely match %served_local $l for $served_local{$l}[0] (" . $served_local{$l}[1] . ")");
+         last EXIT_AS_AUTHORIZED; # as it only needs to succeed once
+        } # unless served_local match precise
+       } # foreach served_local
+      } else { # unless served_local_wildcards match partial
+       debug (0,"Requested $uri passes %served_local_wildcard $l for $served_local_wildcard{$l}[0] (" . $served_local_wildcard{$l}[1] . ")");
+       last EXIT_AS_AUTHORIZED; # as it only needs to succeed once
+      } # unless served_local_wildcards match partial
+     } # foreach served_local_wildcards
+    } # EXIT_AS_AUTHORIZED
+
+    # If exiting as authorized, wasn't caught as a violation (!)
+    # So try to serve the content if the filesystem permissions allow it
+    try_serve($convention);
+   } # if handler
+  } # if method
+ } # sub handle_request
+
+ ## HTTP related routines
+
+ # Print an error
+ sub do_error {
+  my ($error_code, $path, $reason)=@_;
+  my $time_str = time2str(time);
+  my $error_str;
+  # Could make a global variable hash, maybe if more than 2 error codes are supported
+  # https://developer.mozilla.org/en-US/docs/Web/HTTP/Status#successful_responses
+  if ($error_code == "405") {
+   $error_str="Method Not Allowed";
+  } elsif ($error_code == "404") {
+   $error_str="Not Found";
+  } elsif ($error_code == "403") {
+   $error_str="Forbidden";
+  } elsif ($error_code == "402") {
+   $error_str="Payment Required"; # TBD, would be fun
+  } elsif ($error_code == "401") {
+   $error_str="Unauthorized";     # TBD, add bearer token for uploading new code to /live
+  } elsif ($error_code == "400") {
+   $error_str="Bad request ($reason)";
+  } # if error_code
+  # TODO: Should these headers go into a sub?
+  # While it may make the code cleaner, cooking header on the fly shows how the sausage is made
+  # Moving that into a sub might reduce the visibility of the details,
+  # and reduce the possibility of experimentation.
+  # For example, what happens if you remove the Date line? The Cache? The Content-Type?
+  # It's interesting to try localized changes!
+  # However, a function could have an array of defaults, and take another array to add or undef lines
+  print << "EOF";
+HTTP/1.0 $error_code $error_str$ctrlr
+Date: $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: text/html$ctrlr
+$ctrlr
+<!DOCTYPE html>
+<header><title>$error_code $path</title></header>
+<body><h1>$error_code $error_str: $path $reason</h1></body></html>
+EOF
+  debug (0, "Error $error_code $path $reason");
+ } # sub do_error
+
+ # Serve file or directories, no support for compression as payloads are already zipped in the APE
+ # TODO: still, would be nice to add for local files
+ sub try_serve {
+  my ($convention)=@_;
+  my $path = $convention;
+  $path =~ s/\/{3}/\//g;    # /// precisely =>  /
+  $path =~ s/\/{2}/\.\//g;  # //  precisely => ./
+  # Cleanups: also remove the query parameters
+  # it should only be applied to .html? .cgi? and a few other cases like this
+  # otherwise, question marks in files or directories would break things
+  $path=~s/(\.html|\.cgi)\?.*/$1/g;
+  # Special case for /mem: serve the uploaded content as files
+  if ($path =~ m/^\/mem\//) {
+   my $file=$path;
+   #my $mimetype="text/plain";
+   # Better than text/plain
+   my ($mimetype, $encoding)=by_suffix($path);
+   if ($mimetype =~ m/text/ || $mimetype =~ m/json/ || $mimetype =~ m/javascript/) {
+     # We can be sure the payload will be UTF-8 since /mem content is fed by perplebean 
+    $mimetype=$mimetype . "; charset=UTF-8";
+   } # if text, json or javascript
+   $file=~s/^\/mem\///;
+   # First, /mem
+   if (defined($mem{$file})) {
+     # We have the file content, so serve it!
+     my $time_str =time2str(time);
+     my $date_str =time2str($mem{$file}{time});
+     # But first cook a header
+    # TODO: Should these headers go into a sub? 
+     print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: $mimetype; charset=UTF-8;
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+    # Then give the payload
+    my $data= $mem{$file}{data}; 
+    print $data;
+    debug (0, "Served $file from $path");
+    close (STDOUT);
+    return;
+   } else { # if defined mem file
+    do_error (404, $path, "absent");
+    close (STDOUT);
+    return;
+   } # if defined mem file
+  } # if path mem
+
+  # then, normal file: either from /zip or from an allowed list of local paths
+  # With normal files, save the raw path before prefixing it as needed with /zip or $cwd
+  my $path_raw=$path;
+  # Within APPerl, the files are given by cosmo from the /zip folder
+  if ($cosmo == 1) {
+   # FIXME: test these URL in cosmo mode:
+   # http://localhost:8765/zip
+   # http://localhost:8765//
+   # http://localhost:8765///
+   my $exception_to_zip=0;
+   # Check if we shouldn't add /zip:
+   # either because in served_local or server_local_wildcard
+   if (defined($served_local{$convention})) {
+    $exception_to_zip=1;
+    debug (0, "Not reprefixing $convention with /zip as a local exception $served_local{$convention}[0] ($served_local{$convention}[1])");
+    last;
+   } else { # if defined
+    # also check the wildcard
+    foreach my $w (keys %served_local_wildcard) {
+     if ($convention =~ m/^$w/) {
+      $exception_to_zip=1;
+      debug (0, "Not reprefixing $convention with /zip as a local wildcard exception $served_local_wildcard{$convention}[0] ($served_local_wildcard{$convention}[1])");
+      last;
+     } # if uri match
+    } # foreach
+   } # if defined
+
+   unless ($exception_to_zip == 1) {
+    unless ($path =~ m/^\/zip$/) {
+     debug (0, "Adding /zip to requested $path");
+     $path =~ s/^/\/zip/;
+    } else { # path
+     debug (0, "Not reprefixing with /zip the requested $path");
+    } # path
+   } # unless exception_to_zip
+  } else { # if cosmo
+   my $exception_to_cwd=0;
+   # In debug mode, append the current working directory unless it's on the served_local list of exceptions
+
+   if (defined($served_local{$convention})) {
+    $exception_to_cwd=1;
+      debug (0, "Not reprefixing $convention with $cwd as a local exception $served_local_wildcard{$convention}[0] ($served_local_wildcard{$convention}[1])");
+    last;
+   } else { # if defined
+    # also check the wildcard
+    foreach my $w (keys %served_local_wildcard) {
+     if ($convention =~ m/^$w/) {
+      $exception_to_cwd=1;
+      debug (0, "Not reprefixing $convention with $cwd as a local wildcard exception $served_local_wildcard{$convention}[0] ($served_local_wildcard{$convention}[1])");
+      last;
+     } # if uri match
+    } # foreach
+   } # if defined
+
+   unless ($exception_to_cwd ==1) {
+    if ($path=~ m/^\//) {
+     $path = $cwd . $path;
+     debug (0, "path $path_raw became $path using $cwd");
+    } else { # unless exception_to_cwd
+     $path = $cwd . "\/" . $path;
+    } # unless exception_to_cwd
+   } # unless exception_to_cwd
+  } # if cosmo
+
+  # Give an error unless the path exists
+  unless (-e $path) {
+   do_error (404, $path, "unknown");
+   close (STDOUT);
+   return;
+  } else { # unless path
+   # It exists, what what is it?
+   if (-f $path) {
+    # If we have a file...
+    my ($mimetype, $encoding)=by_suffix($path);
+    # If we have a template, read it line by line and insert the uploaded files
+    my $template=0;
+    if ($path =~ m/.template.html$/) {
+     $template=1;
+    }
+    debug (0, "- Serving file: $path of type $mimetype encoded $encoding");
+    if ($mimetype =~ m/text/ || $mimetype =~ m/json/ || $mimetype =~ m/javascript/) {
+     # TODO: It seems overkill to use Encoding::Detect to ensure the payload will be UTF-8
+     # debug (0, " - Assuming the text file is in UTF-8");
+     if ($template>0) {
+      debug (0, " - Template detected, will not say content length");
+      } # if template
+     $mimetype=$mimetype . "; charset=UTF-8";
+    } # if text, json or javascript
+    my $size = (stat($path)) [7];
+    my $date = (stat($path)) [10];
+    my $time_str = time2str(time);
+    my $date_str = time2str($date);
+    unless (open(my $data_fh, "<", $path)) {
+     do_error (403, $path, "file read failed");
+     close (STDOUT);
+     return;
+    } else { # if can open
+     # WARNING: The above empty line with just $ctrlr is important!
+     if ($template <1) {
+      # Cook a header like https://perl.apache.org/docs/general/correct_headers/correct_headers.html
+      print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date: $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: $mimetype$ctrlr
+Content-Length: $size$ctrlr
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+      binmode $data_fh;
+      # Simple buffered read for each kb
+      while (read ($data_fh, my $onek, 1024)) {
+       print $onek;
+      } # while
+      close ($data_fh);
+      close (STDOUT);
+     } else { # if template
+      # Cook a header like https://perl.apache.org/docs/general/correct_headers/correct_headers.html
+      # but without the content-length
+      print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date: $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: $mimetype$ctrlr
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+      # read line by line
+      while (my $line = <$data_fh>) {
+       if ($line =~ m/\_\-[A-Z]+\-\_/) {
+        my $magic=$line;
+        # remove the context
+        $magic=~ s/.*\_\-([A-Z]+)\-\_.*/$1/g;
+        # remove the EOL whether it's \r \n or both
+        $magic =~ s/[\x0A\x0D]$//g;
+        debug (0, "  - Found magic $magic");
+        unless (defined($template{$magic})) {
+         my @formulas=keys(%template);
+         my $formulas_str=join(@formulas, ",");
+         debug (0, "  - Missing magic formula for $magic, known: $formulas_str");
+        } else {
+         my $type = $template{$magic}{'type'};
+         my $replacement_default= $template{$magic}{'default'};
+         # start with the default
+         my $replacement=$replacement_default;
+         debug (0, "  - Found magic formula: $type");
+         my $msg=Dumper($template{$magic}{$type});
+         debug (1, $msg);
+         if ($type =~ m/file/) {
+          my $extension = $template{$magic}{'file'}{'extension'};
+          foreach my $file (keys %mem) {
+           my $replacement_unit= $template{$magic}{'file'}{'replacement'};
+           debug (0, "  - Checking $file for $extension");
+           unless ($file =~ m/\.$extension$/) {
+            debug (0, "  - not matching, next");
+            next;
+           } else {
+            # replace _-file-_ by the actual file
+            $replacement_unit =~ s/_-$type-_/$file/g;
+            debug (1, "replacement is $replacement");
+            if ($replacement =~ m/$replacement_default/) {
+             # if stuck to the default, reassign
+             $replacement=$replacement_unit;
+            } else { # if replacement default
+             # otherwise, append to what was reassigned
+             $replacement=$replacement . $replacement_unit;
+            } # if replacement default
+            debug (0, "  - inserted code for $file");
+            debug (1, "replacement is $replacement");
+           } # if file extension
+          } # foreach file
+          # can now print the replacement
+          print $replacement;
+         } # if type file
+        } # unless defined template magic
+       } else { # if line has magic
+        print $line;
+       } # if line has magic
+      } # while line
+      print "\r\n";
+      close ($data_fh);
+      close (STDOUT);
+     } # if template
+    } # if can open
+   } elsif (-d $path) {
+    unless (opendir( my $data_dh, $path)) {
+     do_error (403, $path, "directory open failed");
+     close (STDOUT);
+     return;
+    } else { # if can open
+     my @files = sort(grep(!/^(\.|\.\.)$/, readdir($data_dh)));
+     my @sortedfiles = sort (@files);
+     my $time_str = time2str(time);
+     my $date = (stat($path)) [10];
+     my $date_str = time2str($date);
+     print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date: $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+<!DOCTYPE html>
+<header><title>Index of $path</title></header>
+<html><h1>Index of $path</h1>
+<table>
+<tr><td><h2>NAME</h2></td><td><h2>DATE</h2></td><td><h2>SIZE (approx)</h2></td><td><h2>EDIT</h2></td></tr>
+EOF
+     # The APE zip directory can show duplicate entries, remove them
+     my @uniquefiles=flat(unique(@files));
+     # Then iterate
+     foreach my $file (@uniquefiles) {
+      # Give just the size and date of each element
+      my $size = (stat($path . '/' . $file)) [7];
+      my $date = (stat($path . '/' . $file)) [10];
+      my $date_str = time2str($date);
+      my $openlink="";
+      if ($file =~ m/\.tsv$/) {
+       $openlink="<a href=\"http://localhost:8765/html/interface.template.html?load=$path_raw/$file\">[Open spreadsheet]</a>";
+      } # if file
+      print "<tr><td><a href=\"$path_raw/$file\">$file</a></td><td>$date_str</td><td><b>$size bytes</b></td><td>$openlink</td></tr>\n";
+     } # foeach
+     print "</table></body></html>";
+     debug (0, "- Served directory: $path with $#files files");
+     close ($data_dh);
+     close (STDOUT);
+     return;
+    } # if can open
+   } # if directory
+  } # path exist
+ } # sub try_serve
+
+ # Run anything within IPC::Run, save the output to the mem hash
+ sub p_bin_ipc {
+  my $uri = $ENV{REQUEST_URI};
+  my $path = $uri;
+  # head
+  $path =~ s/\?.*//;
+  my $pairs_str =$uri;
+  # tail
+  $pairs_str =~ s/.*$path\??//g;
+  # convert %XX into characters etc.
+  $pairs_str =~ s/%(..)/pack("c", hex($1))/ge;
+  debug (3, "\$pairs_str:");
+  my $msg=Dumper($pairs_str);
+  debug (3, $msg);
+  # split along &
+  my @pairs=split ("&", $pairs_str);
+  debug (3, "\@pairs:");
+  $msg=Dumper(@pairs);
+  debug (3, $msg);
+  # then assign in a hash
+  my %pars;
+  foreach my $pair (@pairs) {
+   my $key=$pair;
+   $key=~s/=.*//g;
+   my $val=$pair;
+   $val=~s/.*=//g;
+   $pars{$key}=$val;
+  } # foreach pair
+  debug (3, "\%pars:");
+  $msg=Dumper(%pars);
+  debug (3, $msg);
+  push (@par, \%pars);
+
+  # May have been mangled by env, but required to start a process
+  # FIXME: test signal handling in cosmo mode
+  $SIG{CHLD} = 'DEFAULT';
+
+  # Get the input
+  my $inputfile = $pars{inputfile};
+  my $inputdata;
+  my $inputsize;
+  if (!defined($inputfile) || $inputfile =~ m/^mostrecent$/) {
+   unless (defined($inputfile)) {
+    debug (0, "- Trying to use the most recent instead");
+   }
+   # Override with the ost recent upload
+   my $maxdate=0;
+   foreach my $file (keys %mem) {
+     my $date =$mem{$file}{time};
+     if ($date>$maxdate) {
+      $maxdate=$date;
+     }
+   } # foreach
+   foreach my $file (keys %mem) {
+     my $date =$mem{$file}{time};
+     if ($date==$maxdate) {
+      $inputfile=$file;
+     }
+   } # foreach
+  } # if mostrecent
+
+  if (!defined($mem{$inputfile})) {
+   # TODO: for now, input is implicitely in /mem, but the local filesystem could be supported by default
+   do_error(400, $path, "- Missing input file in /mem");
+   return;
+  } else {
+   $inputdata=$mem{$inputfile}{data};
+   $inputsize=$mem{$inputfile}{size};
+  }
+  my $outputfile = $pars{outputfile};
+  # TODO: likewise, the output could be created on the local filesystem if prefixed with ./
+  if (!defined($outputfile)) {
+   #debug (0, "Missing outputfile parameter");
+   #do_error(400, $path, "Missing output file");
+   #return;
+   my ($second,$minute,$hour) = localtime();
+   # Make sure it's prefixed by a 0 if it's only 1 digit
+   $hour = sprintf("%02d",$hour);
+   $minute = sprintf("%02d",$minute);
+   debug (0, "- Replacing the absent outputfile parameter with " . $hour . "h" . $minute . "m-stats.tsv");
+   $outputfile=$hour . "h" . $minute . "m-stats.tsv";
+  }
+
+  my $w_factor = $pars{w_factor};
+
+  # Within APPerl, the files are given by cosmo from the /zip folder
+  if ($cosmo == 1) {
+   unless ($path =~ m/^\/zip$/) {
+    debug (0, "- Adding /zip prefix to the IPC run $path");
+    $path =~ s/^/\/zip/;
+   } else { # path
+    debug (0, "- Not prefixing with /zip the requested $path");
+   } # path
+  } else { # if cosmo
+   # In debug mode, append the current working directory
+   $path =~ s/^\//$cwd\//;
+  } # if cosmo
+
+  # Feed that to any script that accepts input on stdin
+  my $chld_in=$inputdata;
+  my $chld_out='';
+  my $chld_err='';
+  my $time_str =time2str(time);
+  unless (-f $path) {
+   debug (0, "Can't find the file $path");
+   do_error(405, "$path", "Maybe the path is wrong");
+   return;
+  }
+  debug (0, "- Running");
+  # fail if can't be completed in 9 seconds
+  # FIXME: ipc should have an option to support arguments for parameters like -w W
+  # and must be happy with just having 1 file as an input (stdin / pipe),
+  # FIXME: save chld_err to a %stderr hash to keep track of what's happenings
+  my $chld = IPC::Run::run ["$path"], \$chld_in, \$chld_out, \$chld_err, timeout( 9 );
+
+  my $stdin_stillopen = openhandle(*STDIN);
+  if (defined($stdin_stillopen)) {
+   print "HTTP/1.1 303 See Other\r\n";
+   # And that's it, while saving the output can tell the browser to switch
+   if (defined($ENV{HTTP_REFERER})) {
+    #my $redirect=$ENV{HTTP_REFERER};
+    #$redirect=~s/\?.*//g;
+    #print "Location: $redirect?load=/mem/$outputfile\r\n";
+    debug (0, "- Sent 303 to http://localhost:8765/html/interface.template.html?load=/mem/$outputfile");
+    print "Location: http://localhost:8765/html/interface.template.html?load=/mem/$outputfile\r\n";
+   } else {
+    debug (0, "- Sent 303 to interface.template.html");
+    #print "Location: http://localhost:8765/html/interface.template.html?load=$outputfile\r\n";
+    print "Location: http://localhost:8765/html/interface.template.html\r\n";
+   }
+  }
+  # Good enough
+  my $roughsize;
+  {
+   # Closure so that use bytes doesn't alter the default of returning length in characters
+   use bytes;
+   # Rought approximation, but then we don't need for Devel::Size qw(total_size)
+   $Data::Dumper::Terse = 1;
+   $roughsize=length(Dumper($chld_out));
+  };
+  # "save" the virtual file
+  $mem{$outputfile}{data}=$chld_out;
+  $mem{$outputfile}{size}=$roughsize;
+  $mem{$outputfile}{time}=time;
+  # Update the time of the last upload
+  $mem_last=time;
+  close (STDIN);
+  return;
+ } # sub;
+
+ # Populate the global file variable, for use with CGI.pm
+ sub p_mem_add_cgi {
+  # 1Gb max
+  $CGI::POST_MAX = 1024 * 1024* 1024;
+  my ($cgi, $fileobj) = @_;
+  return if !ref $cgi;
+  my $filename;
+  my $encoding;
+  my $type;
+
+  debug (4, "\$fileobj:");
+  my $msg=Dumper($fileobj);
+  debug (4, $msg);
+
+# WONTFIX Yes this is horrible, but I didn't have time to do better
+  # Like, why learn CGI.pm OO methods when I want to stop using it?
+  my %tf=%{ $fileobj}{'.tmpfiles'};
+
+  foreach my $k (keys(%tf)) {
+   next unless (ref($tf{$k}) eq "HASH");
+   debug (4, "tf k");
+   $msg=Dumper($tf{$k});
+   debug (4, $msg);
+   my %tfk=%{ $tf{$k} };
+   foreach my $l (keys %tfk) {
+    next unless (ref($tfk{$l}) eq "HASH");
+    debug (4, "tfk l");
+    $msg=Dumper($tfk{$l});
+    debug (4, $msg);
+    my %tfkl=%{ $tfk{$l} };
+    foreach my $m (keys %tfkl) {
+     next unless (ref($tfkl{$m}) eq "HASH");
+     debug (4, "tfkl m");
+     $msg=Dumper($tfkl{$m});
+     debug (4, $msg);
+     my %tfklm=%{ $tfkl{$m} };
+     if (defined($tfklm{'Content-Transfer-Encoding'})) {
+       $encoding=$tfklm{'Content-Transfer-Encoding'};
+     }
+     if (defined($tfklm{'Content-Type'})) {
+       $type=$tfklm{'Content-Type'};
+     }
+     my $content=$tfklm{'Content-Disposition'};
+     $content =~ s/^.*filename="//;
+     $content =~ s/".*//;
+     # And finally...
+     $filename=$content;
+    } # foreach
+   } # foreach
+  } # foreach
+
+  # FIXME: Since CGI.pm inteprets, there's no post data.
+  # In theory present in %in, but couldn't find it
+  #debug (0, "POSTDATA was:");
+  #print STDERR $cgi->param("POSTDATA");
+  # As confirmed with:
+  #print STDERR Dumper (%ENV);
+  # So I could try to read STDIN before CGI.pm does as shown in
+  #https://stackoverflow.com/questions/51599761/get-raw-request-body-using-perl-cgi-pm
+  # Or just give up and redo everything from scratch (WIP)
+
+  # This contain the binary file, much easier: named after the input file button
+  my $filecontent_fh = $fileobj->upload("uploadfile");
+
+  # Check if there's a prefix parameter to prefix the filename with
+  my $prefix = $fileobj->param("prefix");
+
+  # If save="Upload with prefix", add it
+  my $save = $fileobj->param("save");
+  if (defined($prefix) && length($prefix)>0
+      && defined($filename) && length($filename)>0) {
+   if (defined($save) && $save =~ m/Keep the edits/) {
+    unless ($filename =~ m/^$prefix\_/) {
+     unless ($prefix =~ m/\_$/) {
+      debug (0, "Received prefix $prefix and filename $filename with necessary collation request: $save");
+      $filename = $prefix . "_" . $filename;
+     } else {
+      debug (0, "Received prefix $prefix and filename $filename with necessary but overprefixed collation request: $save");
+      $filename = $prefix . $filename;
+     }
+    } else {
+     debug (0, "Received prefix $prefix and filename $filename with useless collation request: $save");
+    }
+    # remove spurrious _ after the prefix
+    $filename=~s/$prefix\_\_/$prefix\_/g;
+    debug (0, "Changed filename to $filename");
+   } else { # if request
+    debug (0, "Received prefix $prefix and filename $filename without collation request $save");
+    debug (0, "Filename unchanged");
+   } # if request
+  } # if prefix and filename
+
+  # Now the most problematic case: can't do nothing without a name
+  # it's likely the request is bad anyway ie without a data payload
+  # but try to recycle the prefix
+  unless (defined($filename)) {
+   if (defined($prefix) && length($prefix)>0) {
+    debug (0, "Received no filename with prefix=$prefix");
+    $filename=$prefix;
+    debug (0, "Changed filename to $filename, proceeding");
+   } else { # if prefix
+    debug (0, "No filename, no prefix, silently ignoring");
+    debug (3, "\$fileobj:");
+    $msg=Dumper($fileobj);
+    debug (3, $msg);
+    # If CGI gives 400, this will fail: print() on closed filehandle GEN0
+    # so maybe there's something better than this blind 303
+    # it should at least be conditional and only be sent if CGI didn't send a 400 before
+    my $gen0_stillopen = openhandle(*GEN0);
+    if (defined($gen0_stillopen)) {
+     print "HTTP/1.1 303 See Other\r\n";
+     if (defined($ENV{HTTP_REFERER})) {
+      print "Location: $ENV{HTTP_REFERER}\r\n";
+     } else {
+      print "Location: http://localhost:8765/mem\r\n";
+     }
+    } else {
+     do_error(400, "Bad request", "malformed multipart POST");
+    }
+    close (STDIN);
+    return;
+   } # if prefix
+  } # unless filename
+
+  # However, storing its file handle creates a temporary file for some reason
+  # $mem{$filename}{data}=\$filecontent_fh;
+  # $mem{$filename}{data2}=\<$filecontent_fh>;
+  #
+  # But this piecewise approach works - yet only correct for text files
+  #my @text_array;
+  #while (my $line = <$filecontent_fh>) {
+  # push(@text_array, $line);
+  # read it line-by-line, which is only correct for text files
+  #}
+  #$mem{$filename}{data}=\@text_array;
+
+  unless (defined $filecontent_fh) {
+   debug (0, "Empty file data, silently ignoring");
+   $msg=Dumper($fileobj);
+   debug (3, $msg);
+   # If CGI gives 400, this will fail: print() on closed filehandle GEN0
+   # so maybe there's something better than a blind 303
+   # it should at least be conditional and only be sent if CGI didn't send a 400 before
+   my $gen0_stillopen = openhandle(*GEN0);
+   if (defined($gen0_stillopen)) {
+    print "HTTP/1.1 303 See Other\r\n";
+    if (defined($ENV{HTTP_REFERER})) {
+     print "Location: $ENV{HTTP_REFERER}\r\n";
+    } else {
+     print "Location: http://localhost:8765/mem\r\n";
+    }
+   } else {
+    do_error(400, "Bad request", "malformed multipart POST");
+   }
+   close (STDIN);
+   return;
+  }
+
+  # Better: this works even with binary formats
+  binmode $filecontent_fh;
+  my $output="";
+  # simple buffered read for each kb
+  while (read ($filecontent_fh, my $onek, 1024)) {
+   $output=$output . $onek;
+  }
+  close ($filecontent_fh);
+
+  debug (3, "####################################");
+  debug (3, "Received data:");
+  debug (3, $output);
+
+
+  # Fixme: should base64 decode that if needed, like
+  #$VAR1 = 'Base64';
+  #$VAR1 = 'text/plain; charset=UTF-8';
+  debug (0, "Encoding $encoding Type $type");
+
+  if (defined($encoding)) {
+   if ($encoding =~/Base64/i) {
+    # Trust, but verify
+    my $output_test=$output;
+    # Need to remove spaces and newlines for that
+    $output_test=~s/[\s\n]//g;
+    if ($output_test=~ m{
+     ^
+     (?: [A-Za-z0-9+/]{4} )*
+     (?:
+         [A-Za-z0-9+/]{2} [AEIMQUYcgkosw048] =
+     |
+         [A-Za-z0-9+/] [AQgw] ==
+     )?
+     \z
+    }x) {
+     # Meaning of the regex:
+     # ^ Start of input
+     # Followed by any number of groups of 4 characters from [A-Za-z0-9+/],
+     # Followed by zero or one of the following:
+     #  - Four characters where
+     #    The first and second match /[A-Za-z0-9+/]/
+     #    The third matches /[AEIMQUYcgkosw048]/
+     #    The fourth is a "="
+     #  - Four characters where
+     #    The first matches /[A-Za-z0-9+/]/
+     #    The second matches /[AQgw]/
+     #    The third and fourth are both a "="
+    # Followed by the end of input
+     my $output_b64=$output;
+     $output=decode_base64($output_b64);
+    } else {
+     debug (0, "Hope for the best as output announced as Base64 doesn't pass the regex");
+     my $output_b64=$output;
+     $output=decode_base64($output_b64);
+    }
+   } # base64
+  } # if encoding
+
+  $mem{$filename}{data}=$output;
+
+  # Store 2 extra pieces of information: the size and time it was uploaded
+  my $roughsize;
+  {
+   # Closure so that use bytes doesn't alter the default of returning length in characters
+   use bytes;
+   # Rought approximation, but then we don't need for Devel::Size qw(total_size)
+   $Data::Dumper::Terse = 1;
+   $roughsize=length(Dumper($output));
+  };
+  $mem{$filename}{size}=$roughsize;
+  $mem{$filename}{time}=time;
+  # Update the time of the last upload
+  $mem_last=time;
+
+  debug (1, "File list now:" . join(' ',keys(%mem)) . "\n");
+  debug (0, "Done, sending 303");
+  print "HTTP/1.1 303 See Other\r\n";
+  # 303 allows to switch transparently between POST and GET, can return to the caller
+  if (defined($ENV{HTTP_REFERER})) {
+   print "Location: $ENV{HTTP_REFERER}\r\n";
+  } else {
+   print "Location: http://localhost:8765/mem\r\n";
+  }
+  # TODO Redirect location could be a set of parameters (if success||fail)
+  # not just ENV{HTTP_REFERER} == ENV{HTTP_ORIGIN} + ENV{PATH_INFO}
+  close (STDIN);
+ } # sub p_mem_add_cgi
+
+ sub g_mem_add_cgi {
+  my $time_str =time2str(time);
+  # Cook a header, with variables
+  print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: text/html$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+  # Now give the data payload, with no variables as javascript uses $ a lot
+  print << 'EOF';
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+#drop_zone {
+  border: 5px dashed blue;
+  width: 200px;
+  height: 100px;
+  -moz-border-radius:5px;
+  -webkit-border-radius:5px;
+  border-radius:5px;
+  padding:10px;
+  text-align:center;
+  font:20pt bold,"Vollkorn";
+  color:#bbb
+}
+</style>
+<title>Drop a file</title>
+</head>
+<body>
+<form id="formid" enctype="multipart/form-data" action="/mem/add.cgi" method="post">
+<div id="drop_zone" ondrop="dropHandler(event);" ondragover="dragHandler(event);">
+  <input id="uploadfile" name="uploadfile" class="uploadfile" type="file" multiple>
+  or drop the input file here
+</div>
+<button type="submit" name="submit">Upload</button>
+</form>
+<br>
+
+<script>
+// https://developer.mozilla.org/en-US/docs/Web/API/File_API/Using_files_from_web_applications
+// First, need a trigger if the button is used instead of a drag and drop
+function clickHandler() {
+  console.log('File(s) selected');
+  const fileList = this.files;
+  for (let i = 0, numFiles = fileList.length; i < numFiles; i++) {
+    const file = fileList[i];
+    readFile(file);
+  }
+}
+const inputElement = document.getElementById("uploadfile");
+inputElement.addEventListener("change", clickHandler, false);
+
+// https://developer.mozilla.org/en-US/docs/Web/API/HTML_Drag_and_Drop_API/File_drag_and_drop
+// Then, the drag and drop
+function dragHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) in drop zone');
+}
+
+function dropHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) dropped');
+
+  if (ev.dataTransfer.items) {
+    // Use DataTransferItemList interface to access the file(s)
+    [...ev.dataTransfer.items].forEach((item, i) => {
+      // If dropped items aren't files, reject them
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        console.log(`… file[${i}].name = ${file.name}`);
+        // set the name
+        document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+        readFile(file);
+      }
+    });
+  } else {
+    // Use DataTransfer interface to access the file(s)
+    [...ev.dataTransfer.files].forEach((file, i) => {
+      console.log(`… file[${i}].name = ${file.name}`);
+      // set the name
+      document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+      readFile(file);
+    });
+  }
+}
+
+// can print to console as a bytelist for tests/verifications
+function readFile ( file ) {
+  /*  const fileReader = new FileReader();
+   *  fileReader.readAsArrayBuffer( file );
+   *
+   *  fileReader.onload = ( e ) =>
+   * {
+   *     const bufferArray = e.target.result;
+   *     console.log(e.target.result);
+   * };
+   */
+};
+
+</script>
+</body>
+</html>
+EOF
+ } # sub g_mem_add_cgi
+
+ # Server index
+ sub g_slash {
+  my $time_str =time2str(time);
+  # Cook a header, with variables
+  print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: text/html$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+  # Now the data payload, with no variables
+  print << 'EOF';
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+#drop_zone {
+  border: 5px dashed blue;
+  width: 200px;
+  height: 100px;
+  -moz-border-radius:5px;
+  -webkit-border-radius:5px;
+  border-radius:5px;
+  padding:10px;
+  text-align:center;
+  font:20pt bold,"Vollkorn";
+  color:#bbb
+}
+</style>
+<title>Welcome to PerlPleBean</title>
+</head>
+<body>
+<a href="/env/?test=yeah&really=yes">Test the environment variables</a><br />
+<!-- <a href="/html/interface.html">Raw demo interface</a><br /> -->
+<a href="/html/interface.template.html">Template demo interface</a><br />
+<a href="/html">Index of /html demo assets</a><br />
+<a href="/tsv">Index of /tsv demo input files</a><br />
+<a href="/mem">Index of /mem uploaded content</a><br />
+<a href="/mem/add.cgi">Upload file</a><br />
+<!-- WIP <a href="/upload">Upload another file without CGI</a><br /> -->
+<form id="formid" enctype="multipart/form-data" action="/mem/add.cgi" method="post">
+<div id="drop_zone" ondrop="dropHandler(event);" ondragover="dragHandler(event);">
+  <input id="uploadfile" name="uploadfile" class="uploadfile" type="file" multiple>
+  or drop the input file here
+</div>
+<button type="submit" name="submit">Upload</button>
+</form>
+<br>
+
+<script>
+// https://developer.mozilla.org/en-US/docs/Web/API/File_API/Using_files_from_web_applications
+// First, need a trigger if the button is used instead of a drag and drop
+function clickHandler() {
+  console.log('File(s) selected');
+  const fileList = this.files;
+  for (let i = 0, numFiles = fileList.length; i < numFiles; i++) {
+    const file = fileList[i];
+    readFile(file);
+  }
+}
+const inputElement = document.getElementById("uploadfile");
+inputElement.addEventListener("change", clickHandler, false);
+
+// https://developer.mozilla.org/en-US/docs/Web/API/HTML_Drag_and_Drop_API/File_drag_and_drop
+// Then, the drag and drop
+function dragHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) in drop zone');
+}
+
+function dropHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) dropped');
+
+  if (ev.dataTransfer.items) {
+    // Use DataTransferItemList interface to access the file(s)
+    [...ev.dataTransfer.items].forEach((item, i) => {
+      // If dropped items aren't files, reject them
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        console.log(`… file[${i}].name = ${file.name}`);
+        // set the name
+        document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+        readFile(file);
+      }
+    });
+  } else {
+    // Use DataTransfer interface to access the file(s)
+    [...ev.dataTransfer.files].forEach((file, i) => {
+      console.log(`… file[${i}].name = ${file.name}`);
+      // set the name
+      document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+      readFile(file);
+    });
+  }
+}
+
+// can print to console as a bytelist for tests/verifications
+function readFile ( file ) {
+  /*  const fileReader = new FileReader();
+   *  fileReader.readAsArrayBuffer( file );
+   *
+   *  fileReader.onload = ( e ) =>
+   * {
+   *     const bufferArray = e.target.result;
+   *     console.log(e.target.result);
+   * };
+   */
+};
+
+</script>
+</body>
+</html>
+EOF
+ } # sub g_slash
+
+ # Show the environment, for mostly for tests
+ sub g_env {
+  # To get parameters, set them like http://localhost:8765/test?name=me&you=too
+  my $uri = $ENV{REQUEST_URI};
+  my $path = $uri;
+  # head
+  $path =~ s/\?.*//;
+  my $pairs_str =$uri;
+  # tail
+  $pairs_str =~ s/.*$path\??//g;
+  # convert %XX into characters etc.
+  $pairs_str =~ s/%(..)/pack("c", hex($1))/ge;
+  debug (3, "\$pairs_str:");
+  my $msg=Dumper($pairs_str);
+  debug (3, $msg);
+  # split along &
+  my @pairs=split ("&", $pairs_str);
+  debug (3, "\@pairs:");
+  $msg=Dumper(@pairs);
+  debug (3, $msg);
+  # then assign in a hash
+  my %pars;
+  foreach my $pair (@pairs) {
+   my $key=$pair;
+   $key=~s/=.*//g;
+   my $val=$pair;
+   $val=~s/.*=//g;
+   $pars{$key}=$val;
+  } # foreach pair
+  debug (3, "\%pars:");
+  $msg=Dumper(%pars);
+  debug (3, $msg);
+  push (@par, \%pars);
+
+  my $time_str =time2str(time);
+  # Header and payload in one go
+  print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: text/html$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+<!DOCTYPE html>
+<html>
+<head><title>Environment parameters</title></head>
+<body>
+<h1>$ENV{QUERY_STRING}</h1>
+<h2>$ENV{SERVER_NAME}\@$ENV{SERVER_PORT} replying to $ENV{REMOTE_ADDR}\@$ENV{REMOTE_PORT}</h2>
+<h3>running $ENV{HTTP_USER_AGENT}</h3>
+<h4>Environment parameters:</h4>
+<table>
+<tr><td>NAME</td><td>VALUE</td></tr>
+EOF
+
+  foreach my $k (sort keys(%pars)) {
+   print "<tr><td>$k</td><td>$pars{$k}</td></tr>\n";
+  } # foreach
+
+  print << "EOF";
+</table></body></html>
+<h5>Environment variables:</h4>
+<table>
+<tr><td>NAME</td><td>VALUE</td></tr>
+EOF
+
+  # Actually, no: we're missing the main course, the environment
+  foreach my $k (sort keys(%ENV)) {
+   print "<tr><td>$k</td><td>$ENV{$k}</td></tr>\n";
+  } # foreach
+  print "</table></body>\n</html>\n\r";
+
+ # To try to flush manually, ->rflush;, for STDOUT:
+ #$|=1; print "\n"; $|=0;
+ } # sub g_env
+
+ # List files available from %mem and allow to add new
+ sub g_mem {
+  my $time_str =time2str(time);
+  my $date_str =time2str($mem_last);
+  # With variables (for the header)
+  print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+  # Now without variables (for the many $ inside the javascript)
+  print << 'EOF';
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+#drop_zone {
+  border: 5px dashed #bbf;
+  -moz-border-radius:5px;
+  -webkit-border-radius:5px;
+  border-radius:5px;
+  padding:10px;
+  color:#bbb
+  display:inline;
+}
+#drop_label {
+  align:center;
+  text-align:center;
+  font:20pt bold,"Vollkorn";
+  display:inline;
+}
+h1 {
+  display:inline;
+}
+</style>
+<title>Index of /mem uploaded files</title>
+</head>
+<body>
+<div id="drop_zone" ondrop="dropHandler(event);" ondragover="dragHandler(event);">
+<form id="formid" enctype="multipart/form-data" action="/mem/add.cgi" method="post">
+<table width="100%" style="margin: 0px;"><tr>
+<td align="left"><h1>Index of /mem uploaded files:</h1></td>
+<td align="center">
+<div id="drop_label">
+<input id="uploadfile" name="uploadfile" class="uploadfile" type="file" multiple>
+<button type="submit" name="submit">Upload</button>
+ or drop files here to add them
+</div>
+</td>
+</tr>
+</table>
+</form>
+</div>
+
+<script>
+// https://developer.mozilla.org/en-US/docs/Web/API/File_API/Using_files_from_web_applications
+// First, need a button click fuction, triggerred if the button is used instead of a drag and drop
+function clickHandler() {
+  console.log('File(s) selected');
+  const fileList = this.files;
+  for (let i = 0, numFiles = fileList.length; i < numFiles; i++) {
+    const file = fileList[i];
+    // do something automatically
+    // readFile(file);
+  }
+}
+const inputElement = document.getElementById("uploadfile");
+inputElement.addEventListener("change", clickHandler, false);
+
+// https://developer.mozilla.org/en-US/docs/Web/API/HTML_Drag_and_Drop_API/File_drag_and_drop
+// Then, the drag and drop
+function dragHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) in drop zone');
+}
+
+function dropHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) dropped');
+
+  if (ev.dataTransfer.items) {
+    // Use DataTransferItemList interface to access the file(s)
+    [...ev.dataTransfer.items].forEach((item, i) => {
+      // If dropped items aren't files, reject them
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        console.log(`… file[${i}].name = ${file.name}`);
+        // set the name
+        document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+        // do something automatically
+        // readFile(file);
+      }
+    });
+  } else {
+    // Use DataTransfer interface to access the file(s)
+    [...ev.dataTransfer.files].forEach((file, i) => {
+      console.log(`… file[${i}].name = ${file.name}`);
+      // set the name
+      document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+      // do something automatically
+      // readFile(file);
+    });
+  }
+}
+
+// can Print to console as a bytelist for tests/verifications
+function readFile ( file ) {
+ /* const fileReader = new FileReader();
+  * fileReader.readAsArrayBuffer( file );
+  *
+  * fileReader.onload = ( e ) =>
+  * {
+  *   const bufferArray = e.target.result;
+  *   console.log(e.target.result);
+  * };
+  */
+};
+</script>
+<table>
+<tr><td><h2>NAME</h2></td><td><h2>DATE</h2></td><td><h2>SIZE (approx)</h2></td><td><h2>EDIT</h2></td></tr>
+EOF
+  foreach my $file (keys(%mem)) {
+   my $date =time2str($mem{$file}{time});
+   my $openlink="";
+   if ($file =~ m/\.tsv$/) {
+    $openlink="<a href=\"http://localhost:8765/html/interface.template.html?load=/mem/$file\">[Open spreadsheet]</a>";
+   }
+   print "<tr><td><a href=\"/mem/$file\">$file</a> <a href=\"/mem/del/$file\">(remove)</a></td><td>$date</td><td><b>$mem{$file}{size} bytes</b></td><td>$openlink</td></tr>\n";
+  } # foreach
+  print "</table></body>\n</html>\n\r";
+ } # sub g_mem
+
+ # Delete from mem then return to /mem to show what's left there
+ sub g_mem_del {
+  # Get the argument to delete
+  my $path = $ENV{REQUEST_URI};
+  my $file = $path;
+  $file =~ s/^\/mem\/del\///;
+  delete ($mem{$file});
+  my $keys=scalar(keys(%mem));
+  debug (0, "Deleted $file from %mem now left with $keys entries");
+
+  my $time_str =time2str(time);
+  my $date_str =time2str($mem_last);
+  my $locr_str;
+  if (defined($ENV{HTTP_REFERER})) {
+   $locr_str= "$ENV{HTTP_REFERER}\r\n";
+   if ($locr_str =~ m/\/mem/) {
+    debug (0, "Sending 303");
+    print << "EOF";
+HTTP/1.1 303 See Other$ctrlr
+Location: $locr_str$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+   } elsif ($locr_str=~ m/interface.*html/) {
+   # Anything else could make something bad happen in the interface
+   # (303: would switch to this page, 200: would display a blank page etc.
+    debug (0, "Sending 204");
+    print << "EOF";
+HTTP/1.1 204 No Content$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+   } # if match
+  } else { # if defined HTTP_REFERER
+   $locr_str= "http://localhost:8765/mem\r\n";
+   debug (0, "Sending 303");
+   print << "EOF";
+HTTP/1.1 303 See Other$ctrlr
+Location: $locr_str$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Last-Modified: $date_str$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+  } # if defined HTTP_REFERER
+
+  # WARNING: this should NOT unconditionally send a 303, otherwise the interface will redirect!
+#  my $time_str =time2str(time);
+#  my $date_str =time2str($mem_last);
+#  my $locr_str;
+#  if (defined($ENV{HTTP_REFERER})) {
+#   $locr_str= "$ENV{HTTP_REFERER}\r\n";
+#  } else {
+#   $locr_str= "http://localhost:8765/mem\r\n";
+#  }
+#  debug (0, "Sending 303");
+#  print << "EOF";
+#HTTP/1.1 303 See Other$ctrlr
+#Location: $locr_str$ctrlr
+#Date:  $time_str$ctrlr
+#Pragma: no-cache$ctrlr
+#Cache-control: no-cache$ctrlr
+#Server: $server$ctrlr
+#Last-Modified: $date_str$ctrlr
+#Accept-Ranges: none$ctrlr
+#$ctrlr
+#EOF
+  close(STDIN);
+ } # sub g_mem_del
+
+ ######################################################################
+ # WIP: attempt to replace CGI with either libs or manual decoding
+ ######################################################################
+
+ # Calls GetEncodedFormData or GetMultipartFormData, depending on CONTENT_TYPE
+ sub p_mem_upload {
+  debug (0, "This is the upcoming non-CGI replacement for uploads");
+  #debug (0, "Data: $ENV{POSTDATA}");
+  debug (0, "Expecting: $ENV{CONTENT_LENGTH}");
+  debug (0, "Type: $ENV{CONTENT_TYPE}");
+
+  # With no Expect, no need for HTTP/1.1 100 Continue: just redirect using 303 to switch between POST and GET
+  debug (0, "Sending 303");
+  print "HTTP/1.1 303 See Other\r\n";
+  if (defined($ENV{HTTP_REFERER})) {
+   print "Location: $ENV{HTTP_REFERER}\r\n";
+  } else {
+   print "Location: http://localhost:8765/mem\r\n";
+  }
+  close(STDIN);
+  # That's a whole story...
+  # debug (0, "Sending continue");
+  # print "HTTP/1.1 100 Continue\r\n";
+  #print "HTTP/1.1 200 OK";
+  #print "HTTP/1.1 100 Continue";
+  debug (0, "READ BEGIN:");
+  my $linenbr=0;
+  # Should be some kind of pointer?
+  while (my $lineread = \<*STDIN>)  {
+   debug (0, $lineread);
+   $linenbr=$linenbr+1;
+  }
+  debug (0, "READ END: GOT $linenbr");
+  return;
+
+  if ($debug >100 {
+   # TODO: for checking how receiving http post multipart/form-data works
+   use MIME::Parser;
+   # Create a new parser object:
+   my $parser = new MIME::Parser;
+   # Automatically attempt to RFC 2047-decode the MIME headers?
+   $parser->decode_headers(1);
+   # Ultra-tolerant mechanism:
+   $parser->ignore_errors(1);
+   # Tell it where to put things:
+   #$parser->output_under("/tmp");
+   # Keep parsed message bodies in core (default outputs to disk):
+   $parser->output_to_core(1);
+   # Parse an input filehandle:
+   my $entity = $parser->parse(\*STDIN);
+ 
+   debug (0, "Got:");
+   ### Congratulations: you now have a (possibly multipart) MIME entity!
+   debug (0, $entity->dump_skeleton);
+   debug (0, "Eventual error: $parser->last_error");
+   debug (0, "Content::");
+   my $msg=Dumper($entity);
+   debug (0, $msg);
+  } # if debug > 100
+ } # sub p_mem_upload
+
+ # Frontend for the test upload : submit the form to /upload
+ sub g_upload {
+  my $time_str =time2str(time);
+  # Cook a header, with variables
+  print << "EOF";
+HTTP/1.1 200 OK$ctrlr
+Date:  $time_str$ctrlr
+Pragma: no-cache$ctrlr
+Cache-control: no-cache$ctrlr
+Server: $server$ctrlr
+Content-Type: text/html$ctrlr
+Accept-Ranges: none$ctrlr
+$ctrlr
+EOF
+  # Now the data payload, with no variables
+  print << 'EOF';
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+#drop_zone {
+  border: 5px dashed blue;
+  width: 200px;
+  height: 100px;
+  -moz-border-radius:5px;
+  -webkit-border-radius:5px;
+  border-radius:5px;
+  padding:10px;
+  text-align:center;
+  font:20pt bold,"Vollkorn";
+  color:#bbb
+}
+</style>
+<title>Drop a file</title>
+</head>
+<body>
+<h1>WARNING: upload without CGI is not working yet</h1>
+<form id="formid" enctype="multipart/form-data" action="/mem/upload" method="post">
+<div id="drop_zone" ondrop="dropHandler(event);" ondragover="dragHandler(event);">
+  <input id="uploadfile" name="uploadfile" class="uploadfile" type="file" multiple>
+  or drop the input file here
+</div>
+<button type="submit" name="submit">Upload</button>
+</form>
+<br>
+
+<script>
+// https://developer.mozilla.org/en-US/docs/Web/API/File_API/Using_files_from_web_applications
+// First, need a trigger if the button is used instead of a drag and drop
+function clickHandler() {
+  console.log('File(s) selected');
+  const fileList = this.files;
+  for (let i = 0, numFiles = fileList.length; i < numFiles; i++) {
+    const file = fileList[i];
+    readFile(file);
+  }
+}
+const inputElement = document.getElementById("uploadfile");
+inputElement.addEventListener("change", clickHandler, false);
+
+// https://developer.mozilla.org/en-US/docs/Web/API/HTML_Drag_and_Drop_API/File_drag_and_drop
+// Then, the drag and drop
+function dragHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) in drop zone');
+}
+
+function dropHandler(ev) {
+  // Prevent default behavior (Prevent file from being opened)
+  console.log('Catching default');
+  ev.preventDefault();
+  console.log('File(s) dropped');
+
+  if (ev.dataTransfer.items) {
+    // Use DataTransferItemList interface to access the file(s)
+    [...ev.dataTransfer.items].forEach((item, i) => {
+      // If dropped items aren't files, reject them
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        console.log(`… file[${i}].name = ${file.name}`);
+        // set the name
+        document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+        readFile(file);
+      }
+    });
+  } else {
+    // Use DataTransfer interface to access the file(s)
+    [...ev.dataTransfer.files].forEach((file, i) => {
+      console.log(`… file[${i}].name = ${file.name}`);
+      // set the name
+      document.querySelector('.uploadfile').files = ev.dataTransfer.files;
+      readFile(file);
+    });
+  }
+}
+
+// can print to console as a bytelist for tests/verifications
+function readFile ( file ) {
+  /*  const fileReader = new FileReader();
+   *  fileReader.readAsArrayBuffer( file );
+   *
+   *  fileReader.onload = ( e ) =>
+   * {
+   *     const bufferArray = e.target.result;
+   *     console.log(e.target.result);
+   * };
+   */
+};
+
+</script>
+</body>
+</html>
+EOF
+ } # sub g_upload
+
+ if (-f 'mem.bin') {
+  use Storable;
+  my $date = (stat('mem.bin')) [10];
+  my $date_str = time2str($date);
+  # WONTFIX: use nstore if portability is required
+  my $mem_ref;
+  my $try_success= eval {
+   $mem_ref=retrieve ('mem.bin');
+   1; # for perl <5.14 where $@ might get cleared as the eval block is exited
+  };
+  if (!$try_success) {
+   print "Restoring %mem from mem.bin dated $date_str failed: $@";
+  } else { # unless retrieve
+   %mem=%{ $mem_ref };
+   print "Restoring " . scalar(keys(%mem)) . " thing(s) in %mem from $cwd/mem.bin dated $date_str\n";
+   foreach my $file (keys %mem) {
+    my $filesize=$mem{$file}{size};
+    my $filetime_str =time2str($mem{$file}{time});
+    print "\t/mem/$file $filetime_str $filesize b\n";
+   } # foreach file
+  } # unless retrieve
+ } # file mem.bin
+ # After it's run, say what and where:
+ print "\n$server\n";
+ print "\nBound to:\n";
+ # For enumerating IPs
+ if ($xs_added>0) {
+  use IO::Interface::Simple qw (interfaces); # For listing interfaces
+  my @interfaces = IO::Interface::Simple->interfaces;
+  foreach my $interface (@interfaces) {
+   my $status = "";
+   $status= " (UP)" if $interface->is_running;
+   printf ("\t%-*s\t%s\n", 15, $interface . $status, "http://" . $interface->address . "/8765/");
+  }
+  print "\n";
+ } # if xs_added
+} # package PerlPleBean
+
+# TODO Consider using Net::Address::IP::Local to enumerate the public IPs
+# It would be helpful in case there's a routed IP somewhere, to complain about it
+my $pid = PerlPleBean->new(8765, Socket::AF_INET)->run();
+
+# TODO Consider using dns-sd to advertise on the lan
+# cf https://metacpan.org/pod/Net::MDNS::Server https://metacpan.org/pod/Net::Bonjour::Entry
+# also see https://gist.github.com/vasi/bd46ff3ddb099f1b9a8a56923b2c4d6f
+#use Net::MDNS::Server ':all';
+#service("perlplebin.local", "127.0.0.1", 8765, "http", "tcp");
+# for tests: # https://serverfault.com/questions/118652/how-to-use-bonjour
+# dns-sd -R PerlPleBean _http._tcp local 8765
+
+# TODO Consider forking based on benchmark results
+# Background mode: not so nice on windows as the PID is not very helpful
+# TODO Consider adding a flag to kill the previous instance
+# TODO Consider automatically dumping %mem to a pickle file and respawning if this file changes
+#my $pid = PerlPleBean->new(8765)->background();
+#print "Use 'kill $pid' to stop server.\n";
