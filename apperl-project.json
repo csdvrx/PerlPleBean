@@ -15,11 +15,14 @@
             ],
             "__perllib__/CGI/File" : [ "cpan/perl5/lib/perl5/CGI/File/Temp.pm" ],
             "__perllib__/CGI/HTML" : [ "cpan/perl5/lib/perl5/CGI/HTML/Functions.pm" ],
+            "__perllib__/Devel" : [ "xs/Devel/Gladiator.pm" ],
             "__perllib__/HTML/HTML5" : [ "cpan/perl5/lib/perl5/HTML/HTML5/Entities.pm" ],
             "__perllib__/HTTP" : [ "/usr/share/perl5/HTTP/Date.pm" ],
             "__perllib__/HTTP/Server" : [ "/usr/share/perl5/HTTP/Server/Simple.pm" ],
             "__perllib__/HTTP/Server/Simple" : [ "/usr/share/perl5/HTTP/Server/Simple/CGI.pm" ],
             "__perllib__/HTTP/Server/Simple/CGI" : [ "/usr/share/perl5/HTTP/Server/Simple/CGI/Environment.pm" ],
+            "__perllib__/IO" : [ "xs/IO/Tty.pm", "xs/IO/Interface.pm" ],
+            "__perllib__/IO/Interface" : [ "xs/IO/Interface/Simple.pm", "xs/IO/Interface.pm"],
             "__perllib__/IPC" : [ "cpan/perl5/lib/perl5/IPC/Run.pm" ],
             "__perllib__/IPC/Run" : [
                "cpan/perl5/lib/perl5/IPC/Run/IO.pm",
@@ -57,11 +60,10 @@
          },
          "WARNING": "only bin/ and lib/ are included by default in the /zip overlay so list here the extra root files and folders used",
          "XS": "for XS modules, 1) add the module to poe and prf below 2) add both .xs C code and perl .pm to xs/",
-         "perl_onlyextensions" : ["IO::Tty", "Devel::Gladiator", "IO::Interface::Simple"],
          "perl_repo_files" : {
-             "ext/IO::Tty" : ["xs/Tty.xs", "xs/IO/Tty.pm"],
-             "ext/IO::Interface::Simple" : ["xs/Interface.xs", "IO/Interface/Simple.pm", "./IO/Interface.pm"],
-             "ext/Devel::Gladiator" : ["xs/Gladiator.xs", "xs/Devel/Gladiator.pm"]
+             "ext/IO::Tty" : ["xs/Tty.xs"],
+             "ext/IO::Interface::Simple" : ["xs/Interface.xs"],
+             "ext/Devel::Gladiator" : ["xs/Gladiator.xs"]
          },
          "+MANIFEST" : [
                         "html", "tsv", "favicon.ico", "Makefile",
@@ -71,7 +73,8 @@
                         "__perlarchlib__/Devel/Gladiator.pm",
                         "__perlarchlib__/IO/Interface/Simple.pm",
                         "__perlarchlib__/IO/Interface.pm"
-         ]
+         ],
+         "perl_onlyextensions" : ["IO::Tty", "Devel::Gladiator", "IO::Interface::Simple"]
       }
    },
    "defaultconfig" : "PerlPleBean"
