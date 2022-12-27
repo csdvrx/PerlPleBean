@@ -1,0 +1,78 @@
+{
+   "apperl_configs" : {
+      "PerlPleBean" : {
+         "base" : "v5.36.0-full-v0.1.0",
+         "desc" : "HTTP server included: HTTP::Server::Simple::CGI with its dependencies",
+         "dest" : "perlplebean.com",
+         "zip_extra_files" : {
+            "__perllib__" : [ "cpan/perl5/lib/perl5/CGI.pm", "/usr/share/perl5/Fh.pm", "cpan/perl5/lib/perl5/Readonly.pm" ],
+            "__perllib__/CGI" : [
+               "cpan/perl5/lib/perl5/CGI/Carp.pm",
+               "cpan/perl5/lib/perl5/CGI/Cookie.pm",
+               "cpan/perl5/lib/perl5/CGI/Pretty.pm",
+               "cpan/perl5/lib/perl5/CGI/Push.pm",
+               "cpan/perl5/lib/perl5/CGI/Util.pm"
+            ],
+            "__perllib__/CGI/File" : [ "cpan/perl5/lib/perl5/CGI/File/Temp.pm" ],
+            "__perllib__/CGI/HTML" : [ "cpan/perl5/lib/perl5/CGI/HTML/Functions.pm" ],
+            "__perllib__/HTML/HTML5" : [ "cpan/perl5/lib/perl5/HTML/HTML5/Entities.pm" ],
+            "__perllib__/HTTP" : [ "/usr/share/perl5/HTTP/Date.pm" ],
+            "__perllib__/HTTP/Server" : [ "/usr/share/perl5/HTTP/Server/Simple.pm" ],
+            "__perllib__/HTTP/Server/Simple" : [ "/usr/share/perl5/HTTP/Server/Simple/CGI.pm" ],
+            "__perllib__/HTTP/Server/Simple/CGI" : [ "/usr/share/perl5/HTTP/Server/Simple/CGI/Environment.pm" ],
+            "__perllib__/IPC" : [ "cpan/perl5/lib/perl5/IPC/Run.pm" ],
+            "__perllib__/IPC/Run" : [
+               "cpan/perl5/lib/perl5/IPC/Run/IO.pm",
+               "cpan/perl5/lib/perl5/IPC/Run/Debug.pm",
+               "cpan/perl5/lib/perl5/IPC/Run/Win32Helper.pm",
+               "cpan/perl5/lib/perl5/IPC/Run/Win32Process.pm",
+               "cpan/perl5/lib/perl5/IPC/Run/Timer.pm",
+               "cpan/perl5/lib/perl5/IPC/Run/Win32IO..pm",
+               "cpan/perl5/lib/perl5/IPC/Run/Win32Pump.pm" ],
+            "__perllib__/MIME" : [
+               "cpan/perl5/lib/perl5/MIME/Types.pm",
+               "cpan/perl5/lib/perl5/MIME/Type.pm",
+               "cpan/perl5/lib/perl5/MIME/types.db"
+            ],
+            "__perllib__/Statistics" : [ "cpan/perl5/lib/perl5/Statistics/Descriptive.pm" ],
+            "__perllib__/Statistics/Descriptive" : [
+               "cpan/perl5/lib/perl5/Statistics/Descriptive/Full.pm",
+               "cpan/perl5/lib/perl5/Statistics/Descriptive/Sparse.pm",
+               "cpan/perl5/lib/perl5/Statistics/Descriptive/Weighted.pm"
+            ],
+            "__perllib__/Statistics/Descriptive/Smoother" : [
+               "cpan/perl5/lib/perl5/Statistics/Descriptive/Smoother/Exponential.pm",
+               "cpan/perl5/lib/perl5/Statistics/Descriptive/Smoother/Weightedexponential.pm"
+            ],
+            "bin" : ["bin/perlplebean"],
+            "html" : ["html/interface.template.html"],
+            "tsv" : ["tsv/demo.stats.tsv"],
+            "html/css" : ["html/css/xspreadsheet.css"],
+            "html/js" : [
+                "html/js/sheetjs.shim.min.js",
+                "html/js/sheetjs.xlsx.full.min.js",
+                "html/js/xspreadsheet.js",
+                "html/js/glue.sheetjs.xspreadsheet.js"
+            ]
+         },
+         "WARNING": "only bin/ and lib/ are included by default in the /zip overlay so list here the extra root files and folders used",
+         "XS": "for XS modules, 1) add the module to poe and prf below 2) add both .xs C code and perl .pm to xs/",
+         "+perl_onlyextensions" : ["IO::Tty", "Devel::Gladiator", "IO::Interface::Simple"],
+         "perl_repo_files" : {
+             "ext/IO::Tty" : ["xs/Tty.xs", "xs/IO/Tty.pm"],
+             "ext/IO::Interface::Simple" : ["xs/Interface.xs", "IO/Interface/Simple.pm", "./IO/Interface.pm"],
+             "ext/Devel::Gladiator" : ["xs/Gladiator.xs", "xs/Devel/Gladiator.pm"]
+         },
+         "+MANIFEST" : [
+                        "html", "tsv", "favicon.ico", "Makefile",
+                        "__perlarchlib__/IO/Pty.pm",
+                        "__perlarchlib__/IO/Tty.pm",
+                        "__perlarchlib__/IO/Tty/Constant.pm",
+                        "__perlarchlib__/Devel/Gladiator.pm",
+                        "__perlarchlib__/IO/Interface/Simple.pm",
+                        "__perlarchlib__/IO/Interface.pm"
+         ]
+      }
+   },
+   "defaultconfig" : "PerlPleBean"
+}
