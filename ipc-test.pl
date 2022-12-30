@@ -16,6 +16,10 @@ my $debug=0;
 # Will get some input data from HTTP POST, and return it after running it through a perl script
 my $chld="/tmp/test.pl"; # created below
 my $testinput="line 1 just lf\nline 2 just lf\nline3 has crlf\r\nline 4 just lf\n";
+my $do_run3s_nostdin=0;
+my $do_run3s=0;
+my $do_run3=0;
+my $do_run=1;
 
 # And this will check if the output is in the right place
 sub check {
@@ -42,6 +46,8 @@ if ($Config{osname} =~ m/^cosmo/ || $Config{archname} =~ m/cosmo$/) {
 } else {
   $cosmo=0;
 }
+
+print STDOUT "Cosmo detected: $cosmo\n";
 
 # perl doesn't release memory to the system to reallocate as needed
 # Leverage that behavior: prealloc 4k to simulate that
@@ -88,7 +94,7 @@ unless (-t STDIN) {
 EOF
 close $FH_TEST;
 
-if (1) {
+if ($do_run3s_nostdin) {
  print STDOUT "\nFirst trying with no input run3 simple";
  my $run3s=IPC::Run3::Simple::run3 (["$^X", "$chld"], undef, \$chld_out, \$chld_err), timeout (2) or print STDERR ("run3 simple error $!");
  print STDOUT "...no input run3 simple results: $run3s\n";
@@ -105,7 +111,7 @@ if (1) {
 }
 
 # first, IPC::Run3::Simple: simply run3 with stdin left to undef
-if (1) {
+if ($do_run3s) {
  print STDOUT "\nNow trying run3 simple... ";
  my $run3s=IPC::Run3::Simple::run3 (["$^X", "$chld"], \$chld_in, \$chld_out, \$chld_err), timeout (2) or print STDERR ("run3 simple error $!");
 
@@ -125,7 +131,7 @@ if (1) {
 }
 
 # Then IPC::Run3
-if (1) {
+if ($do_run3) {
  print STDOUT "\nNow trying run3 with timeout 2... ";
  my $run3=IPC::Run3::run3 (["$^X", "$chld"], \$chld_in, \$chld_out, \$chld_err), timeout( 2) or print STDERR ("run3 error $!");
 
@@ -145,7 +151,7 @@ if (1) {
 }
 
 # finally IPC::Run
-if (1) {
+if ($do_run) {
  print STDOUT "\nNow trying run with timeout 2... ";
  my $run=IPC::Run::run (["$^X", "$chld"], \$chld_in, \$chld_out, \$chld_err), timeout( 2 ) or print STDERR ("run error $!");
  print STDOUT "...run results: $run\n";
