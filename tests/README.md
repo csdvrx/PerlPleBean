@@ -126,9 +126,101 @@ conditional: this is illustrated in ipc-test.pl, the final version.
 
 ## Testing ipc-test.pl from WSL2
 
+## Normal results
+
+```{normal}
+Parent: child pid is 2330
+Parent: child pid 2330 finished
+Child: exiting: because arguments to preserve forking safety
+Parent: on linux running /usr/bin/perl as ./ipc-test.pl
+Parent: passed the Chinese wall, left child behind: 2330
+Parent: requesting run of /usr/bin/perl hello.pl 2330
+Parent: run: RISK OF FORKBOMB /usr/bin/perl due to previous child pid 2330 matching current child pid 2330
+Parent: run: /usr/bin/perl with hello.pl instead of ipc-test.pl from ./ipc-test.pl
+Parent: run: CAUTION: /usr/bin/perl hello.pl FINAL
+Parent: run: received Hello /usr/bin/perl hello.pl
+Parent: run: exiting with 1
+```
+
+Let's do it again!
+
+```
+# ./ipc-test.pl hello.pl
+Parent: child pid is 2391
+Parent: child pid 2391 finished
+Child: exiting: because arguments to preserve forking safety
+Parent: on linux running /usr/bin/perl as ./ipc-test.pl
+Parent: passed the Chinese wall, left child behind: 2391
+Parent: requesting run of /usr/bin/perl hello.pl 2391
+Parent: run: RISK OF FORKBOMB /usr/bin/perl due to previous child pid 2391 matching current child pid 2391
+Parent: run: /usr/bin/perl with hello.pl instead of ipc-test.pl from ./ipc-test.pl
+Parent: run: CAUTION: /usr/bin/perl hello.pl FINAL
+Parent: run: received Hello /usr/bin/perl hello.pl
+Parent: run: exiting with 1
+```
+
+## In APE mode
+
 From WSL2, perlplebean.com is repacked with ipc-test.pl to replace /zip/bin/perlplebean and an extra bin/hello.pl as the test payload:
     
     ./repack.sh ipc-test.pl
     cp hello.pl bin/
     zip -r perlplebean.com bin/hello.pl
     perlplebean.com bin/hello.pl
+
+```{forkbombing}
+$ ./perlplebean.com bin/hello.pl
+Parent: child pid is 4
+Parent: child pid 4 finished
+Child: exiting: because arguments to preserve forking safety
+Parent: on cosmo running perlplebean.com as /zip/bin/perlplebean
+Parent: passed the Chinese wall, left child behind: 4
+Parent: requesting run of perlplebean.com bin/hello.pl 4
+Parent: run: RISK OF FORKBOMB perlplebean.com due to previous child pid 4 matching current child pid 4
+Cosmo mode detected so prefixing bin/hello.pl with /zip
+Parent: run: perlplebean.com with /zip/bin/hello.pl instead of perlplebean from /zip/bin/perlplebean
+Parent: run: CAUTION: perlplebean.com bin/hello.pl FINAL
+Parent: run: received Child: exiting: because arguments to preserve forking safety
+Parent: child pid is 4   <=== HERE
+Parent: child pid 4 finished
+Parent: on cosmo running ./perlplebean.com as /zip/bin/perlplebean
+Parent: passed the Chinese wall, left child behind: 4
+Parent: requesting run of ./perlplebean.com bin/hello.pl 4 with output filename FINAL
+Cosmo mode detected so prefixing bin/hello.pl with /zip
+Parent: run: ./perlplebean.com with /zip/bin/hello.pl instead of perlplebean from /zip/bin/perlplebean
+Parent: run: CAUTION: ./perlplebean.com bin/hello.pl FINAL
+Parent: run: exiting with 1
+Parent: run: exiting with 1
+```
+
+As we can see in the line indicated by "HERE", another ipc-test.pl is started instead of using the handcrafted ["$^X", "$ARGV[0]", "$pid"]
+
+### What about strace?
+
+It doesn't help much, as nothing much is shown, even when there are already hundreds of processes slowing the machine to a crawl.
+
+It's possibly due to flushing issues, as even with all the prompt cuteness (PS0 PS1...) removed and when running in a regular /bin/sh, all I get is:
+
+```
+$ ./perlplebean.com bin/hello.pl --strace
+SYS   3272          1'929'543 bell system five system call support 552 magnums loaded on the new technology
+SYS   3272          2'235'144 __morph_begin()
+SYS   3272          3'686'431 __morph_end()
+```
+
+### Conclusion
+
+So far, despite all the various (and overkill!) precautions taken, it doesn't seem possible to nicely avoid this behavior.
+
+The only possible workaround may be to look at the pid (as 4 is abormally low) with simple semaphore based on the existence of a locking file.
+
+While it may be portable, it doesn't look very nice.
+
+Overall, it may be better to further patch perl.c to hijack unused flags like -z to override the current default behavior:
+ - -z to not do anything
+ - -z scriptname to use this alternative name
+ 
+However, it may be better to invert this and make instead the current behavior dependant of -z :
+ - by default, don't alter scriptname
+ - -z alone to alter scriptname to use $0 (like now)
+ - -z scriptname to alter scriptname and use this alternative name
