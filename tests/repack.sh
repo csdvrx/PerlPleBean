@@ -32,7 +32,11 @@ unzip -lv perlplebean.com|grep " bin/" |grep pl$
 if [ "$INSIZE" = "$OUTSIZE" ]; then
  echo "which matches $1 of size $OUTSIZE:"
  ls -la $1
+ # OK
+ exit 0
 else
  echo "WHICH DOESN'T MATCHES???"
  ls -la $1
+ # KO
+ exit 1
 fi
