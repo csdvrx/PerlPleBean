@@ -1,222 +1,104 @@
 {
-   "defaultconfig" : "PerlPleBean",
+   "defaultconfig" : "sxs_perl.com",
    "apperl_configs" : {
-      "small_perl.com" : {
-         "dest" : "com/small_perl.com",
-         "desc" : "perl.com from source, small",
-         "base" : "v5.36.0-small-v0.1.0"
-      },
-      "full_perl.com" : {
-         "dest" : "com/full_perl.com",
-         "desc" : "perl.com from source, full",
-         "base" : "v5.36.0-full-v0.1.0"
-      },
-      "PerlPleBean" : {
-         "dest" : "perlplebean.com",
-         "base" : "v5.36.0-full-v0.1.0",
-         "desc" : "Still no XS",
+      "sxs_perl.com" : {
+         "dest" : "com/sxs_perl.com",
+         "desc" : "rolling release APPerl full, with Static XS modules",
+         "base" : "full",
+         "install_modules": ["src.xs/IO-Socket-Multicast-1.12", "src.xs/Clone-0.46", "src.xs/Devel-Gladiator-0.08", "src.xs/PPI-XS-0.910"],
+         "instaLl_modules_sql": ["src.xs/IO-Socket-Multicast-1.12", "src.xs/DBI-1.643", "src.xs/DBD-SQLite-1.72", "src.xs/Clone-0.46", "src.xs/Devel-Gladiator-0.08", "src.xs/PPI-XS-0.910"],
+         "install_modules_todo": ["src.xs/IO-Socket-Multicast-1.12", "src.xs/Net-LibIDN-0.12", "src.xs/Net-LibIDN2-1.02", "src.xs/DBI-1.643", "src.xs/Clone-0.46", "src.xs/Devel-Gladiator-0.08", "src.xs/PPI-XS-0.910", "src.xs/IO-Interface-1.09"],
          "zip_extra_files" : {
-            "bin" : [
-               "bin/perlplebean",
-               "bin/stats.pl"
-            ],
-            "html" : [
-               "html/interface.template.html"
-            ],
-            "html/css" : [
-               "html/css/xspreadsheet.css"
-            ],
-            "html/js" : [
-               "html/js/sheetjs.shim.min.js",
-               "html/js/sheetjs.xlsx.full.min.js",
-               "html/js/xspreadsheet.js",
-               "html/js/glue.sheetjs.xspreadsheet.js"
-            ],
-            "tsv" : [
-               "tsv/demo.stats.tsv"
-            ],
-            "__perllib__" : [
-               "cpan/perl5/lib/perl5/CGI.pm",
-               "/usr/share/perl5/Fh.pm",
-               "cpan/perl5/lib/perl5/Readonly.pm"
-            ],
-            "__perllib__/CGI" : [
-               "cpan/perl5/lib/perl5/CGI/Carp.pm",
-               "cpan/perl5/lib/perl5/CGI/Cookie.pm",
-               "cpan/perl5/lib/perl5/CGI/Pretty.pm",
-               "cpan/perl5/lib/perl5/CGI/Push.pm",
-               "cpan/perl5/lib/perl5/CGI/Util.pm"
-            ],
-            "__perllib__/CGI/File" : [
-               "cpan/perl5/lib/perl5/CGI/File/Temp.pm"
-            ],
-            "__perllib__/CGI/HTML" : [
-               "cpan/perl5/lib/perl5/CGI/HTML/Functions.pm"
-            ],
-            "__perllib__/HTML/HTML5" : [
-               "cpan/perl5/lib/perl5/HTML/HTML5/Entities.pm"
-            ],
-            "__perllib__/HTTP" : [
-               "/usr/share/perl5/HTTP/Date.pm"
-            ],
-            "__perllib__/HTTP/Server" : [
-               "/usr/share/perl5/HTTP/Server/Simple.pm"
-            ],
-            "__perllib__/HTTP/Server/Simple" : [
-               "/usr/share/perl5/HTTP/Server/Simple/CGI.pm"
-            ],
-            "__perllib__/HTTP/Server/Simple/CGI" : [
-               "/usr/share/perl5/HTTP/Server/Simple/CGI/Environment.pm"
-            ],
-            "__perllib__/IPC" : [
-               "cpan/perl5/lib/perl5/IPC/Run.pm"
-            ],
-            "__perllib__/IPC/Run" : [
-               "cpan/perl5/lib/perl5/IPC/Run/IO.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Debug.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32Helper.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32Process.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Timer.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32IO.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32Pump.pm"
-            ],
-            "__perllib__/MIME" : [
-               "cpan/perl5/lib/perl5/MIME/Types.pm",
-               "cpan/perl5/lib/perl5/MIME/Type.pm",
-               "cpan/perl5/lib/perl5/MIME/types.db"
-            ],
-            "__perllib__/MIME/Decoder" : [
-               "cpan/perl5/lib/perl5/MIME/Decoder/Base64.pm"
-            ],
-            "__perllib__/Statistics" : [
-               "cpan/perl5/lib/perl5/Statistics/Descriptive.pm"
-            ],
-            "__perllib__/Statistics/Descriptive/Smoother" : [
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Smoother/Exponential.pm",
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Smoother/Weightedexponential.pm"
-            ],
-            "__perllib__/Statistics/Descriptive" : [
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Full.pm",
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Sparse.pm",
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Weighted.pm"
-            ],
-            "Makefile" : [ "Makefile" ]
-         },
-         "WARNING" : "only bin/ and lib/ are included by default in the /zip overlay so list here the extra root files and folders used",
-         "+MANIFEST" : [
-            "html",
-            "tsv",
-            "Makefile"
-         ]
-      },
-      "PerlPleBean-XS" : {
-         "dest" : "perlplebean.com",
-         "base" : "v5.36.0-full-v0.1.0",
-         "desc" : "Still working on it",
-         "zip_extra_files" : {
-            "bin" : [
-               "bin/perlplebean",
-               "bin/stats.pl"
-            ],
-            "html" : [
-               "html/interface.template.html"
-            ],
-            "html/css" : [
-               "html/css/xspreadsheet.css"
-            ],
-            "html/js" : [
-               "html/js/sheetjs.shim.min.js",
-               "html/js/sheetjs.xlsx.full.min.js",
-               "html/js/xspreadsheet.js",
-               "html/js/glue.sheetjs.xspreadsheet.js"
-            ],
-            "tsv" : [
-               "tsv/demo.stats.tsv"
-            ],
-            "__perllib__" : [
-               "cpan/perl5/lib/perl5/CGI.pm",
-               "/usr/share/perl5/Fh.pm",
-               "cpan/perl5/lib/perl5/Readonly.pm"
-            ],
-            "__perllib__/CGI" : [
-               "cpan/perl5/lib/perl5/CGI/Carp.pm",
-               "cpan/perl5/lib/perl5/CGI/Cookie.pm",
-               "cpan/perl5/lib/perl5/CGI/Pretty.pm",
-               "cpan/perl5/lib/perl5/CGI/Push.pm",
-               "cpan/perl5/lib/perl5/CGI/Util.pm"
-            ],
-            "__perllib__/CGI/File" : [
-               "cpan/perl5/lib/perl5/CGI/File/Temp.pm"
-            ],
-            "__perllib__/CGI/HTML" : [
-               "cpan/perl5/lib/perl5/CGI/HTML/Functions.pm"
-            ],
-            "__perllib__/HTML/HTML5" : [
-               "cpan/perl5/lib/perl5/HTML/HTML5/Entities.pm"
-            ],
-            "__perllib__/HTTP" : [
-               "/usr/share/perl5/HTTP/Date.pm"
-            ],
-            "__perllib__/HTTP/Server" : [
-               "/usr/share/perl5/HTTP/Server/Simple.pm"
-            ],
-            "__perllib__/HTTP/Server/Simple" : [
-               "/usr/share/perl5/HTTP/Server/Simple/CGI.pm"
-            ],
-            "__perllib__/HTTP/Server/Simple/CGI" : [
-               "/usr/share/perl5/HTTP/Server/Simple/CGI/Environment.pm"
-            ],
-            "__perllib__/IPC" : [
-               "cpan/perl5/lib/perl5/IPC/Run.pm"
-            ],
-            "__perllib__/IPC/Run" : [
-               "cpan/perl5/lib/perl5/IPC/Run/IO.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Debug.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32Helper.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32Process.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Timer.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32IO.pm",
-               "cpan/perl5/lib/perl5/IPC/Run/Win32Pump.pm"
-            ],
-            "__perllib__/MIME" : [
-               "cpan/perl5/lib/perl5/MIME/Types.pm",
-               "cpan/perl5/lib/perl5/MIME/Type.pm",
-               "cpan/perl5/lib/perl5/MIME/types.db"
-            ],
-            "__perllib__/MIME/Decoder" : [
-               "cpan/perl5/lib/perl5/MIME/Decoder/Base64.pm"
-            ],
-            "__perllib__/Statistics" : [
-               "cpan/perl5/lib/perl5/Statistics/Descriptive.pm"
-            ],
-            "__perllib__/Statistics/Descriptive/Smoother" : [
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Smoother/Exponential.pm",
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Smoother/Weightedexponential.pm"
-            ],
-            "__perllib__/Statistics/Descriptive" : [
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Full.pm",
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Sparse.pm",
-               "cpan/perl5/lib/perl5/Statistics/Descriptive/Weighted.pm"
-            ],
-            "Makefile" : [ "Makefile" ]
-         },
-         "WARNING" : "only bin/ and lib/ are included by default in the /zip overlay so list here the extra root files and folders used",
-         "WARNING_XS" : "for XS modules, list in perl_onlyextensions replacing :: with _, add the important content to perl_repo_file, add to Manifest, but the syntax isn't clear yet",
-         "perl_repo_files" : {
-            "ext/DevelGladiator" : [
-               "src.xs/Devel-Gladiator-0.08/Gladiator.xs",
-               "src.xs/Devel-Gladiator-0.08/lib/Devel/Gladiator.pm"
+            "lib/perl5/site_perl/5.36.0/x86_64-cosmo/File" : [
+               "src/Temp.pm"
             ]
-         },
-         "perl_onlyextensions" : [
-            "DevelGladiator"
-         ],
-         "+MANIFEST" : [
-            "html",
-            "tsv",
-            "Makefile",
-            "__perlarchlib__/DevelGladiator/Gladiator.pm"
-         ]
+         }
+   },
+      "old_sxs_perl.com" : {
+         "dest" : "com/old_sxs_perl.com",
+         "desc" : "rolling release APPerl full, with extra core modules and Static XS modules",
+         "base" : "full",
+         "install_modules": ["src.xs/IO-Socket-Multicast-1.12", "src.xs/Clone-0.46", "src.xs/Devel-Gladiator-0.08", "src.xs/PPI-XS-0.910"],
+         "install_modules_sql": ["src.xs/IO-Socket-Multicast-1.12", "src.xs/DBI-1.643", "src.xs/DBD-SQLite-1.72", "src.xs/Clone-0.46", "src.xs/Devel-Gladiator-0.08", "src.xs/PPI-XS-0.910"],
+         "install_modules_todo": ["src.xs/IO-Socket-Multicast-1.12", "src.xs/Net-LibIDN-0.12", "src.xs/Net-LibIDN2-1.02", "src.xs/Clone-0.46", "src.xs/Devel-Gladiator-0.08", "src.xs/PPI-XS-0.910", "src.xs/IO-Interface-1.09"],
+         "zip_extra_files" : {
+            "lib/perl5/site_perl/5.36.0/x86_64-cosmo/File" : [
+               "src/Temp.pm"
+            ],
+            "__perllib__" : [
+               "/usr/share/perl5/URI.pm"
+            ],
+            "__perllib__/URI" : [
+               "/usr/share/perl5/URI/news.pm",
+               "/usr/share/perl5/URI/_userpass.pm",
+               "/usr/share/perl5/URI/snews.pm",
+               "/usr/share/perl5/URI/_login.pm",
+               "/usr/share/perl5/URI/WithBase.pm",
+               "/usr/share/perl5/URI/urn.pm",
+               "/usr/share/perl5/URI/ldapi.pm",
+               "/usr/share/perl5/URI/rtspu.pm",
+               "/usr/share/perl5/URI/nntp.pm",
+               "/usr/share/perl5/URI/sip.pm",
+               "/usr/share/perl5/URI/ldap.pm",
+               "/usr/share/perl5/URI/sips.pm",
+               "/usr/share/perl5/URI/URL.pm",
+               "/usr/share/perl5/URI/QueryParam.pm",
+               "/usr/share/perl5/URI/gopher.pm",
+               "/usr/share/perl5/URI/http.pm",
+               "/usr/share/perl5/URI/_segment.pm",
+               "/usr/share/perl5/URI/tn3270.pm",
+               "/usr/share/perl5/URI/rtsp.pm",
+               "/usr/share/perl5/URI/_ldap.pm",
+               "/usr/share/perl5/URI/Split.pm",
+               "/usr/share/perl5/URI/ldaps.pm",
+               "/usr/share/perl5/URI/Escape.pm",
+               "/usr/share/perl5/URI/_idna.pm",
+               "/usr/share/perl5/URI/pop.pm",
+               "/usr/share/perl5/URI/_server.pm",
+               "/usr/share/perl5/URI/_foreign.pm",
+               "/usr/share/perl5/URI/mms.pm",
+               "/usr/share/perl5/URI/IRI.pm",
+               "/usr/share/perl5/URI/mailto.pm",
+               "/usr/share/perl5/URI/file.pm",
+               "/usr/share/perl5/URI/https.pm",
+               "/usr/share/perl5/URI/data.pm",
+               "/usr/share/perl5/URI/ssh.pm",
+               "/usr/share/perl5/URI/sftp.pm",
+               "/usr/share/perl5/URI/rlogin.pm",
+               "/usr/share/perl5/URI/Heuristic.pm",
+               "/usr/share/perl5/URI/rsync.pm",
+               "/usr/share/perl5/URI/_generic.pm",
+               "/usr/share/perl5/URI/_punycode.pm",
+               "/usr/share/perl5/URI/ftp.pm",
+               "/usr/share/perl5/URI/telnet.pm",
+               "/usr/share/perl5/URI/_query.pm"
+            ],
+            "__perllib__/URI/urn" : [
+               "/usr/share/perl5/URI/urn/oid.pm",
+               "/usr/share/perl5/URI/urn/isbn.pm"
+            ],
+            "__perllib__/URI/file" : [
+               "/usr/share/perl5/URI/file/Base.pm",
+               "/usr/share/perl5/URI/file/OS2.pm",
+               "/usr/share/perl5/URI/file/FAT.pm",
+               "/usr/share/perl5/URI/file/Mac.pm",
+               "/usr/share/perl5/URI/file/Unix.pm",
+               "/usr/share/perl5/URI/file/Win32.pm",
+               "/usr/share/perl5/URI/file/QNX.pm"
+            ],
+            "__perllib__/LWP": [
+               "/usr/share/perl5/LWP/MediaTypes.pm"
+            ],
+            "__perllib__/HTTP" : [
+               "/usr/share/perl5/HTTP/Date.pm"
+            ],
+            "__perllib__/HTTP/Request" : [
+               "/usr/share/perl5/HTTP/Request/Common.pm"
+            ],
+            "__perllib__/Exporter" : [
+               "/usr/share/perl5/Exporter/Tiny.pm"
+            ]
+         }
       }
    }
 }
