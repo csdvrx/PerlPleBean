@@ -1,9 +1,0 @@
-APE binaries like zip.com are downloaded here by the Makefile
-
-It's also where sxs_perl.com is created by the Makefile: com/sxs_perl.com includes a few Static XS modules, hence the name.
-
-sxs_perl.com is build by apperl using the JSON file.
-
-This is a bit slow for agile development and bisect testing, so the Makefile uses com/sxs_perl.com as a base to create com/perlplebean.com.
-
-com/perlplebean.com contains the pure perl modules from CPAN that are needed by PerlPleBean: it's used to create perlplebean.com in the main directory by adding other assets like the HTML payloads and the TSV files
