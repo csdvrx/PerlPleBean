@@ -1,0 +1,3 @@
+Pure perl cpan modules that should go in sxp_perl.com may need patches: the Makefile will eventually handle that, as it's faster to zip refresh than change the json file and rebuild
+
+It's also a nice place to keep patches until they are added to APPerl
