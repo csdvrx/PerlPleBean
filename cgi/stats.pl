@@ -9,6 +9,7 @@ use v5.14;                      # for /r match+assign on regexp and ~~ smartmatc
 no strict;
 no warnings;
 use open qw(:std);              # should use unicode, but (:std :utf8) gives mojibake
+use Scalar::Util qw(openhandle);
 
 ## Minimalistic set of dependancies: must not come from CPAN for portability
 use Data::Dumper;               # for cheap debug, always present by default
@@ -23,7 +24,7 @@ use POSIX;
 use Statistics::Descriptive::Weighted;
 use Statistics::Descriptive;
 
-my $debug=0; # be like super verbose
+my $debug=0;   # 0 otherwise it'll be like super verbose
 my %groups;    # hash, counting elements for each group
 my %stats;     # hash, with stats data
 
@@ -169,7 +170,24 @@ my @data;       # where the data is stored
 my $fields_nbr; # for the whole file, to detect sudden changes indicate of a format error
 my $line_num=0; # line counter for debugging with the above
 
-while (my $line = <>) {
+if (scalar(@ARGV)>0) {
+ print STDERR "Reading content for the given files: " . join(";;", @ARGV) . "\n";
+} else {
+ print STDERR "Expecting content on STDIN: type then press Control-D to end input\n";
+}
+
+unless (scalar(@ARGV)==1) {
+ print STDERR "Usage:\n\t$0 inputfile.tsv\n";
+ exit(1);
+}
+
+my $INPUTFH;
+open (INPUTFH, "<", $ARGV[0]) or die "could not open file $read: $!";
+if ($debug>0) {
+ print "Opened $ARGV[0]\n";
+}
+while(<INPUTFH>) {
+  my $line =$_;
   # strip CRLF better than chomp
   $line =~ s/[\x0A\x0D]$//g;
   my @line_read;
@@ -189,10 +207,22 @@ while (my $line = <>) {
   $line_num=$line_num+1;
 } # while
 
+if (openhandle(*INPUTFH)) {
+ close(INPUTFH) or die ("Could not close file $ARGV[0]: $!");
+}
+if ($debug>0) {
+ print STDERR "Done with $ARGV[0]\n";
+}
+# FIXME: should loop over ARGV or use the diamond operator
+
 # Secondary check: refuse to process without any data
 if (scalar (@data)<2)
  {
   print STDERR "There is not even one line of data, indicating a possible error\n";
+  print STDERR "FYI, ARGV was: " . join(";;", @ARGV) . "\n";
+  my $size = (stat($ARGV[0])) [7];
+  my $date = (stat($ARGV[0])) [10];
+  print STDERR "ARGV0 size=$size, date=$date\n";
   die "Cant do without data\n";
  }
 # set the number of lines
@@ -293,7 +323,9 @@ if ($debug>0) {
  } # if >20
 } # if debug
 
-print STDERR "Step 3: Using data to create a TSV with statistics:\n";
+if ($debug >0) {
+ print STDERR "Step 3: Using data to create a TSV with statistics:\n";
+}
 
 # the output TSV format specification is the first line:
 print "group\ttype\tcorrectmed_unweighted\tcorrected_med\tcorrected_med_pval\tcorrected_mean\tcorrected_stdev\traw_mean\traw_stdev\tmad\tmad_stdev\traw_med\traw_med_pval\tlow_boundary\ttop_boundary\tselected_values\tselected_values_weights\toutliers_values\toutliers_values_weights\tnbr_selected\tnbr_outliers\tnbr_total\n";
