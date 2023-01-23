@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-use strict;
+#use strict;
 use warnings;
 # To relax strict for references
 #no strict "refs";
@@ -37,15 +37,219 @@ use warnings;
 # https://stackoverflow.com/questions/17988642/perls-main-package-block-syntax-pragmas-and-begin-end-blocks
 # can also manipulate the END blocks from within using Manip::END
 
-# TODO: if namespacing, should the first block define our own STDOUT STDERR to avoid issues?
+#############################################################################
+# bonjour forking inside a begin block to hide code from children
+#############################################################################
+
+use POSIX        qw(WNOHANG);       # could also use setsid make child leader
+
+# No debug no nothing yet - by design, to keep the mDNS part as simple as possible
+BEGIN { # BEGIN block 0
+ # forking within a BEGIN block hides the code past this block from the child
+ print STDOUT "PerlPleBean mother:$$: spawning bonjour_child within BEGIN block 0\n";
+ #$SIG{CHLD} = sub {
+ #  our bonjour_child;
+ #  # Can't just checkout finished children..
+ #  #waitpid($bonjour_child, WNOHANG);
+ #  # .. because we can't assume protection from zombies by $SIG{CHLD}='IGNORE';
+ #  # since we set it to DEFAULT
+ #  print "PerlPleBean mother:$$: prepared in case of bonjour mDNS crash\n";
+ #  while ((my $bonjour_child_end = waitpid(-$bonjour_child, WNOHANG)) > 0) {
+ #   print STDOUT "PerlPleBean mother$$: bonjour_child $bonjour_child_end finished, did it crash?\n";
+ #  } # while
+ #}; # sub $SIG{CHLD}
+ # fork, not fork and exit as we may spawn more children for handling http
+ our $bonjour_child = fork;
+ if (!defined $bonjour_child) { # error
+  die "PerlPleBean mother:$$: problem forking bonjour child $_: $!";
+ }
+ if ($bonjour_child) { # parent
+  print "PerlPleBean mother:$$: successfully spawned bonjour child $bonjour_child\n";
+ }
+ if ($bonjour_child == 0) {
+  print "PerlPleBean child0:$$: starting multicast DNS\n";
+  use Net::DNS::Nameserver;
+  my $ttl=30; # if no further reply about 4*ttl after the initial reply, will remove the entry
+  my $authoritative=0;
+  sub bonjour_child_dns_handler {
+   my ( $qname, $qclass, $qtype, $peerhost, $query, $conn ) = @_;
+   my ( $rcode, @ans, @auth, @add );
+ 
+   if ( $qclass eq "IN" && $qtype eq "PTR" && $qname eq "_services._dns-sd._udp.local" ) {
+    # general discovery, for use with: dns-sd  -B  _services._dns-sd._udp  local.
+    print "PerlPleBean bonjour_child:$$: 1st query (PTR _services._dns-sd._udp.local) is matching, preparing reply = 1x PTR #####\n";
+    my $ptr = Net::DNS::RR->new("_services._dns-sd._udp.local $ttl PTR _http._tcp.local.");
+    push @ans, $ptr;
+    $rcode = "NOERROR";
+   } elsif ( $qclass eq "IN" && $qtype eq "PTR" && $qname eq "_http._tcp.local" ) {
+    # respond to http service discovery, for use with: dns-sd -B _http._tcp local.
+    # NOT: dns-sd -B PerlPleBean._http._tcp local.
+    # OTHERWISE ASKS: PerlPleBean._sub._http._tcp.local
+    print "PerlPleBean child0:$$: 2nd query (PTR _http._tcp.local) is matching, preparing reply = 1x PTR + 1x SRV + 1x A #####\n";
+    my $ptr = Net::DNS::RR->new("_http._tcp.local $ttl PTR PerlPleBean._http._tcp.local.");
+    push @ans, $ptr;
+    $rcode = "NOERROR";
+    # In theory with 2 records, SRV and PTR, along with an optional TXT
+    # according to "Publication: An Example" figure 4.1 of https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/NetServices/Articles/NetServicesArchitecture.html#//apple_ref/doc/uid/20001074-SW1
+    # However, not seen in tcpdump, more like piecewise queries and replies
+    # More like "Discovery" figure 4.2 of https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/NetServices/Articles/NetServicesArchitecture.html#//apple_ref/doc/uid/20001074-SW1
+    # But seems required?
+    my $priority=0;
+    my $weight=0;
+    my $port=3210;
+    my $srv = Net::DNS::RR->new("PerlPleBean._http._tcp.local SRV $priority $weight $port 4.lo.perlplebean.local.");
+    push @ans, $srv;
+    $rcode = "NOERROR";
+    # FIXME: doesn't seem to be used? could try with a CNAME or a glue record?
+    my $a =  Net::DNS::RR->new("4.lo.perlplebean.local. $ttl A 127.2.2.2");
+    push @ans, $a;
+   } elsif ( $qclass eq "IN" && $qtype eq "SRV" && $qname eq "PerlPleBean._http._tcp.local" ) {
+    print "PerlPleBean child0:$$: 3nd query is matching (SRV PerlPleBean._http._tcp.local), preparing reply = 1x SRV #####\n";
+    my $priority=0;
+    my $weight=0;
+    my $port=3210;
+    my $srv = Net::DNS::RR->new("PerlPleBean._http._tcp.local SRV $priority $weight $port perlplebean.local.");
+    push @ans, $srv;
+    $rcode = "NOERROR";
+   } elsif ( $qclass eq "IN" && $qtype eq "A" && $qname eq "perlplebean.local" ) {
+    print "PerlPleBean child0:$$: 4th query is matching (A perlplebean.local), preparing reply = 1x A #####\n";
+    # Yeah I'm like totally legit, trust me because I said so
+    $authoritative=1;
+    # And this reply is NOT ignored but actually used lol
+    my $a = Net::DNS::RR->new("perlplebean.local. $ttl A 127.0.0.1");
+    push @ans, $a;
+    $rcode = "NOERROR";
+   } elsif ( $qclass eq "IN" && $qtype eq "PTR" && $qname eq "1.0.0.127.in-addr.arpa.local" ) {
+    print "PerlPleBean child0:$$: 5th query is matching (PTR in-addr.arpa.local), preparing reply = 1x PTR\n";
+    # OMG we're sooo authoritative that we're asked the reverse!
+    # Let's keep playing along, because of course we're like totally legit, amirite?
+    $authoritative=1;
+    # legit af I'm telling you, now please believe this at least for a minute
+    my $ttl1min=60;
+    #my $ptr = Net::DNS::RR->new("4.5.6.127.in-addr.arpa.local $ttl1min PTR perlplebean.local");
+    my $ptr = Net::DNS::RR->new("1.0.0.127.in-addr.arpa.local $ttl1min PTR perlplebean.local");
+    push @ans, $ptr;
+    $rcode = "NOERROR";
+   } elsif ( $qclass eq "IN" && $qtype eq "A" && $qname eq "spreadsheet.local" ) {
+    print "PerlPleBean child0:$$: 4th query is matching (A spreadsheet.local), preparing reply = 1x A #####\n";
+    # Yeah I'm like totally legit, trust me because I said so
+    $authoritative=1;
+    # And this reply is NOT ignored but actually used lol
+    my $a = Net::DNS::RR->new("perlplebean.local. $ttl A 127.3.2.1");
+    push @ans, $a;
+    $rcode = "NOERROR";
+   } elsif ( $qclass eq "IN" && $qtype eq "PTR" && $qname eq "1.2.3.127.in-addr.arpa.local" ) {
+    print "PerlPleBean child0:$$: 5th query is matching (PTR in-addr.arpa.local), preparing reply = 1x PTR\n";
+    # OMG we're sooo authoritative that we're asked the reverse!
+    # Let's keep playing along, because of course we're like totally legit, amirite?
+    $authoritative=1;
+    # legit af I'm telling you, now please believe this at least for a minute
+    my $ttl1min=60;
+    #my $ptr = Net::DNS::RR->new("4.5.6.127.in-addr.arpa.local $ttl1min PTR perlplebean.local");
+    my $ptr = Net::DNS::RR->new("1.2.3.127.in-addr.arpa.local $ttl1min PTR spreadsheet.local");
+    push @ans, $ptr;
+    $rcode = "NOERROR";
+   } elsif ( $qclass eq "IN" && $qtype eq "AAAA" && $qname eq "spreadsheet.local" ) {
+    print "PerlPleBean child0:$$: 6th query is matching (AAAA spreadsheet.local), preparing SERVFAIL reply = 1x AAAA\n";
+    my $aaaa = Net::DNS::RR->new("perlplebean.local. $ttl AAAA ::1");
+    # Pretend to be sick?
+    $rcode = "SERVFAIL";
+    push @ans, $aaaa;
+   } elsif ( $qclass eq "IN" && $qtype eq "AAAA" && $qname eq "perlplebean.local" ) {
+    print "PerlPleBean child0:$$: 6th query is matching (AAAA perlplebean.local), preparing NXDOMAIN reply = 1x AAAA\n";
+    # May want to claim a private IPv6 address, but while IPv4 offers a lot of space in 127/8
+    # IPv6 only offers 1 loopback address ::1 (!!!)
+    # Before, it has fec0::/10 for site-local address precedence 1, but deprecated by rfc3879
+    # Could use instead fc00::/7 unique-local address even if precedence 3, but requires ifup
+    # May have to do with link local unicast fe80::/64 but would suck as much as 169.254/16
+    # TLDR: IPv6 has nothing as good (ie not requiring ifup) and as roomy (for random alloc) as IPv4 loopback
+    my $aaaa = Net::DNS::RR->new("perlplebean.local. $ttl AAAA ::1");
+    # The best move seems to be not to play, so be IPv6 incompatible: fail
+    # because ::1 would bring back port sharing issues (would have to multiplex port 80 and 443)
+    # that 127/8 avoids (2^24 =~> 16M apps could each claim port 80 and 443 at the same time)
+    #$rcode = "NOERROR";
+    # Play dead?
+    $rcode = "NXDOMAIN";
+    # Pretend to be sick?
+    #$rcode = "SERVFAIL";
+    push @ans, $aaaa;
+   } elsif ( $qclass eq "IN" && $qtype eq "TXT" && $qname eq "PerlPleBean._http._tcp.local" ) {
+    print "PerlPleBean child0:$$: last and optional query is matching (TXT PerlPleBean._http._tcp.local), preparing reply = 1 TXT\n";
+    my $txt = Net::DNS::RR->new("PerlPleBean._http._tcp.local TXT PurpleBean.local.");
+    push @ans, $txt;
+    $rcode = "NOERROR";
+   } elsif ( $qclass eq "IN" && $qtype eq "A" && $qname eq "PerlPleBean._http._tcp.local" ) {
+    # TODO: this is more like an attempt to see what's possible
+    print "PerlPleBean child0:$$: CUSTOM 1 query is matching (A PerlPleBean._http._tcp.local), preparing reply = 2x A\n";
+    # FIXME: doesn't seem used for anything
+    my $a1 = Net::DNS::RR->new("PerlPleBean._http._tcp.local $ttl A 127.0.1.7");
+    push @ans, $a1;
+    # Goal: get a .local, .localhost or .test domain
+    # FIXME: doesn't seem to work, could try with a CNAME or a glue record?
+    my $a2 =  Net::DNS::RR->new("perlplebean.local. $ttl A 127.0.1.8");
+    push @ans, $a2;
+    $rcode = "NOERROR";
+   } elsif ( $qname eq "_http._tcp.local" ) {
+    $rcode = "NXDOMAIN";
+   } else {
+    #  Keep an eye on to notice spurious requests than could interfere, like
+    #  _microsoft_mcc._tcp.local IN PTR
+    print "PerlPleBean child0:$$: Received unknown query from $peerhost to " . $conn->{sockhost} . " #####\n";
+    #$query->print;
+    print "qname=$qname, qclass=$qclass, qtype=$qtype, peerhost=$peerhost\n";
+    #$rcode = "NXDOMAIN";
+    # Play dead in case something special is expected
+    $rcode = "SERVFAIL";
+   }
+   # mark the answer as authoritative by setting the 'aa' flag?
+   # FIXME: confirm it should only be required when stuffing the ballot box (A, NS or CNAMES)
+   my $headermask = {aa => $authoritative};
+   # specify EDNS options as { option => value } ?
+   my $optionmask = {};
+ 
+   # FIXME: ideally, would reply just for what's handled, not sure how to do that yet
+   #if ($rcode eq "NOERROR") {
+    return ( $rcode, \@ans, \@auth, \@add, $headermask, $optionmask );
+   #} else {
+   #  return (0);
+   #}
+  } # sub handler
+
+  my $ns = Net::DNS::Nameserver->new(
+   # LocalAddr    => "127.0.0.1",
+   MCastAddr    => "224.0.0.251",
+   # FIXME: should have a MCastTTL option instead of hardcoding 2
+   # FIXME: should also have a MCastReplyTo option instead of hardcoding replying to both
+   LocalPort    => 5353,
+   ReplyHandler => \&bonjour_child_dns_handler,
+   Verbose      => 1
+  ) || die "PerlPleBean child0:$$: problem when creating the nameserver\n";
+  $ns->main_loop;
+ } # if bonjour_child
+
+ print STDOUT "PerlPleBean mother:$$: done spawning bonjour_child $bonjour_child with BEGIN block 0\n";
+} # BEGIN block 0
+
+# The child of begin block 0 can't see past the block 0 by construction
+# This is good, as this first child will be tasked with Bonjour DNS
+# which is uh, "very experimental" with homebaked DNS packets and may crash
+# or do other weird things, yet with limited risks as it can't see the rest of the file
+#
+# Here 100% sure to be in the parent, and ready to launch more child
+our $bonjour_child;
+print "PerlPleBean mother:$$: bonjour waiting for $bonjour_child in case of mDNS crash\n";
+waitpid(-$bonjour_child, WNOHANG);
+#print "$$ bonjour $bonjour_pid exited\n";
+# The waitpid is chould handled in a $SIG{CHLD}
 
 # First block: before APperl fix, it avoided forkbombing caused by argv mangle
-BEGIN {
+BEGIN { # BEGIN block 1
+ # TODO: if namespacing, should the first block define our own STDOUT STDERR to avoid issues?
  unless (defined($ENV{PPB})) {
   # define it to the current pid if never defined
   $ENV{PPB} = "$$";
   # and say h, preextractedello
-  print STDOUT "Pid $$: $^O $^X $0 starts, exporting PPB\n";
+  print STDOUT "PerlPleBean parent:$$: $^O $^X $0 starts, exporting PPB\n";
  } else {
   die ("Avoiding forkbomb");
  } # else defined $ENV{PPB}
@@ -76,12 +280,12 @@ BEGIN {
 EXIT_OVERRIDE: {
  local $ignore_exit = 1;
  eval {
-  print STDOUT "Pid $$: exit override check: on sucess will print IGNORED_EXIT(1):\n";
+  print STDOUT "PerlPleBean parent:$$: exit override check: on success will print IGNORED_EXIT(1):\n";
   exit(1); # This will not cause a normal return!
  }; # eval
 } # EXIT_OVERRIDE
 if ($exit_ignored==1) {
- print STDOUT "Pid $$: exit override check: passed!\n";
+ print STDOUT "PerlPleBean parent:$$: exit override check: passed!\n";
 } elsif ( $@ ) {
  die("exit override check: failed: exception when detecting exit: $@\n");
 } else {
@@ -98,7 +302,7 @@ if ($exit_ignored==1) {
 # END blocks are less used: mostly in debug to track why child processes die
 END {
  # every variable will have been undef so use $$
- print STDOUT "Pid $$ ends with $? within namespace " . __PACKAGE__ . "\n";
+ print STDOUT "PerlPleBean parent:$$: ends with $? within namespace " . __PACKAGE__ . "\n";
  &Carp::cluck;
 } # END block 1
 
@@ -106,26 +310,27 @@ END {
 # Be minimalist: CPAN must be managed in apperl-project.json and Makefile
 #############################################################################
 
+# And some core modules may not be in APPerl or require patching like Temp.pm
+use Cwd          qw(cwd);           # For the current working directory
+use Storable     qw(retrieve);      # For persisitng %mem
+use File::Temp   qw(tempfile);      # For creating temporary files
+use HTTP::Date   qw(time2str);      # For converting epochs to http dates
+use Time::HiRes  qw(gettimeofday);  # For debug precise timestamps
+use Scalar::Util qw(openhandle);    # To check if a FH can be opened
+#use IO::Interface ':flags';         # For listing interfaces on HTTP::Daemon
+use Data::Dumper;                   # For easily printing data structures
 # So explain why we want non core modules from CPAN
 # WARNING: IPC needs a tweak because SET_FL is not yet implemented in cosmo
 # ENOSYS/1/Function not implemented/0/The operation completed successfully:
 # fcntl( 8, F_ETFL, O_NONBLOCK ) at /zip/lib/perl5/5.36.0/IPC/Run/IO.pm line 315
 # So instead of IPC::Run, use Eval::Safe even if limits bin/ to .pl for now
 use Eval::Safe;                     # For running scripts in CGI-like style
-use Data::Dumper;                   # For easily printing data structures
 use HTTP::Daemon;                   # The core, subclass of IO::Socket::IP
 require IO::Socket::IP;             # so it directly supports socket operations
-use IO::Interface ':flags';         # For listing interfaces on HTTP::Daemon
-use File::Temp   qw(tempfile);      # For creating temporary files
-use Scalar::Util qw(openhandle);    # To check if a FH can be opened
-use HTTP::Date   qw(time2str);      # For converting epochs to http dates
-use Time::HiRes  qw(gettimeofday);  # For debug precise timestamps
 use MIME::Types  qw(by_suffix);     # For better guessing the mime types
 use MIME::Base64 qw(decode_base64); # For the eventual decoding
-use Storable     qw(lock_nstore nstore store retrieve); # For persisitng %mem
-use POSIX        qw(WNOHANG);       # could also use setsid make child leader
-use Carp         qw(confess cluck); # For saying what's happening
-use Cwd          qw(cwd);           # For the current working directory
+use Devel::Gladiator qw(arena_table); # For precise sizes
+# FIXME: requires IO::Interface?
 
 my $server       ="PerlPleBean $^O";# FIXME: unless shown by curl add this to HTTP::Daemon
 my $debug        =30;               # FIXME: make levels consistent and document
@@ -139,9 +344,14 @@ my $ctrlr        ="\r";             # For exposing where carriage returns go in 
 
 # Can handle up to maxrequest*nbrchildren at once, since each child does maxrequests
 my %configurable =(
- 'listen_name'    => 'localhost',
+ # Totally NOT fancy
+ #'listen_name'    => 'localhost',
+ #'listen_addr'    => '127.0.0.1',
+ #'listen_port'    => 8765,
+ # But this is livin the high life!
+ 'listen_name'    => 'perlplebean.local',
  'listen_addr'    => '127.0.0.1',
- 'listen_port'    => 8765,
+ 'listen_port'    => 3210,
  'nbr_children'   => 1,
  # FIXME: will have to study the consequences of >1 on %mem
  # and how desirable Cache::FastMmap would be
@@ -243,6 +453,8 @@ my %evaled_inputfiles = (
 my %handlers = (
  'POST'          => {
   '/mem_upload'  => {'name' => "p_mem_upload", 'code'=>\&p_mem_upload},   # TODO: WIP, future replacement
+  '/statz'       => {'name' => "p_statz",      'code'=>\&p_statz},        # run the statz() sub
+  '/gmadz'       => {'name' => "p_gmadz",      'code'=>\&p_gmadz},        # run the gmadz() sub
  },
  'GET'           => {
   '/hello'       => {'name' => "g_hello",      'code'=>\&g_hello},
@@ -289,12 +501,14 @@ my %template= (
 # Signal handling
 #############################################################################
 
-# WARN causes cluck: like confess gives the code branches but  doesn't exit
-local $SIG{__WARN__} = \&cluck;
+# WARN causes cluck: like confess gives the code branches but doesn't exit
+local $SIG{__WARN__} = \&Carp::cluck;
 
+# FIXME FIXME: maybe should reap children like our $bonjour_child
 # Persist memory upon interrupt: serialize the hash to a file
 $SIG{'INT'} = sub {
- use Storable qw(lock_nstore nstore store);
+ use Carp qw(confess);
+ use Storable qw(lock_nstore nstore);
  if (scalar(keys(%mem))>0) {
   debug (-1, "\nSaving memory %mem containing to mem.bin with:\n\t" . join("\n\t",keys(%mem)));
   # On windows: can't get exclusive lock on mem.bin: EACCES/5/Permission denied/5/Access is denied
@@ -324,7 +538,7 @@ $SIG{'USR2'} = sub {
  # local is like my, except it save the old value and will restore it when leaving the block
  local $^W=0; # disable warnings in this block
  debug (-1, "Received USR2, showing stats");
- my $msg=cluck("Code path:");
+ my $msg=&Carp::cluck("Code path:");
 # TODO: improve like https://stackoverflow.com/questions/18398692/how-can-i-adjust-the-rendering-of-objects-in-a-longmess
 # use overload '""' => sub {
 #  my $self = shift;
@@ -446,7 +660,7 @@ sub g_env {
  my $uri = $cgi{'REQUEST_URI'};
  # Output to the client
  local *STDOUT = $client;
- # To get parameters, set them like http://localhost:8765/test?name=me&you=too
+ # To get parameters, set them like http://localhost:3210/test?name=me&you=too
  # head
  my $path = $uri;
  $path =~ s/\?.*//;
@@ -589,7 +803,397 @@ sub g_index {
   EOF
 } # sub g_index
 
-# "
+#"
+# Do simples statistics on the input
+# Quick hack based on p_cgi
+sub p_statz {
+ my $client=shift;
+ my $request=shift;
+ my $cgi_ref=shift;
+
+ ################# 0: Get the data
+
+ my $uri = $cgi_ref->{'REQUEST_URI'};
+ # FIXME: add a switch based on method for a get mode case like:
+ my %content;
+ my $what=$uri;
+ # if ($uri =~ m/\.pl\?/ P
+ # %content=get_uri_data($uri);
+ # $
+ #} else {
+  %content=get_form_data($request);
+  $what=~s/\?.*//;
+ #}
+
+ # the files are in the post data, either as
+ # - if empty, defaults to a special meaning, respectively mostrecent and TBD:stdout
+ # - as one-liners containing the file name
+ # - TBD as actual raw files 
+
+ my $inputfile= $content{'inputfile'};
+ my $outputfile= $content{'outputfile'};
+
+ # FIXME: needless repetition for now, but will remind putting that in a sub
+ debug (1, "\tp_statz: may_exec: what=$what inputfile=$inputfile outputfile=$outputfile");
+
+ # Then, check outputfile: simpler
+ if ($outputfile =~ m/\// || scalar(split("\n", $outputfile))>1) {
+  debug (-1, "\tp_statz: outputfile must go to /mem by declaring just the filename");
+  do_error($client, 400, $what, "\tp_statz: outputfile must be a filename not a path");
+ } elsif ($outputfile =~ m/^stdout$/) {
+  debug (-1, "\tp_statz: not support yet for when outputfile is the stdout");
+  do_error($client, 400, $what, "\tp_statz: outputfile must be a filename not stdout");
+ } elsif (!(defined($outputfile) || length($outputfile)<2)) {
+  #do_error($client, 400, $path, "Missing output file");
+  #return;
+  my ($second,$minute,$hour) = localtime();
+  # Make sure it's prefixed by a 0 if it's only 1 digit
+  $hour = sprintf("%02d",$hour);
+  $minute = sprintf("%02d",$minute);
+  debug (0, "\tp_statz: outputfile absent or just 1 character, so replaced by: " . $hour . "h" . $minute . "m.tsv");
+  $outputfile=$hour . "h" . $minute . "m.tsv";
+ }
+
+ # Then, check inputfile: more complicated, as it includes
+ # - first finding the most recent if absent
+ # - TBD checking eval_inputfile_ok positive list and eval_inputfile_ko negative list
+ #   to exclude from inputfile assets from say cgi-bin
+ #   to avoid leaking credentials if there's cgi-bin/cat.pl
+ # - if from %mem, materializing the data into a temp filea
+
+ my $inputfile_ok=0;
+ my $inputfilefh_toclose=1; # If not read from %mem
+
+ if (scalar(split("\n", $inputfile))>1) {
+  debug (-1, "\tp_statz: no support yet for when inputfile is not a filename but the raw file");
+  # Though we could totally just write that to a temp fh. TBD "soon"
+  do_error($client, 400, $what, "\tp_statz: input file must be a filename");
+  # last BIN_REFUSE; # FIXME: could also add block for generic error handling
+ }
+
+ # a file with no / is supposed to be from /mem/
+ if (!defined($inputfile) || $inputfile =~ m/^mostrecent$/) {
+  debug (1, "\tp_statz: inputfile=$inputfile so finding the most recent file in %mem");
+  my $maxdate=0;
+  foreach my $file (keys %mem) {
+    my $date =$mem{$file}{time};
+    if ($date>$maxdate) {
+     $maxdate=$date;
+    }
+  } # foreach
+  foreach my $file (keys %mem) {
+    my $date =$mem{$file}{time};
+    if ($date==$maxdate) {
+     $inputfile=$file;
+    }
+  } # foreach
+ debug (1, "\tp_statz: inputfile=mostrecent=$inputfile");
+ } # if mostrecent
+
+ # By default, no / means /mem/:  the data will need to be materialized into a file
+ my @inputfile_lines;
+ if ($inputfile =~ m/^\/mem\// || !($inputfile=~ m/\//)) {
+  $inputfile=~s/^\/mem\///;
+  unless (defined($mem{$inputfile})) {
+   # find an approximation?
+   my $similar=0;
+   # FIXME: correct the JS code to add the prefix and remove the nearmatch feature
+   if (1) { # if near match allowed
+    foreach my $k (keys %mem) {
+     # It's nice there's an actual key, but data is required
+     # otherwise print $inputfile_fhtmp $mem{$inputfile}{'data'}) would fail
+     # and since it doesn't have a retry, might as well find the most suitable match now
+     if ($k =~ m/$inputfile/ && defined($mem{$k}{'data'})) {
+      # FIXME: bad name in JS interface: doesn't use the prefix so:
+      debug (2, "\tp_statz: FIXME: due to bad JS Missing input file $inputfile in /mem, but found near match $k");
+      $inputfile=$k;
+      $similar=1;
+     } # if k match
+    } # foreach k
+   } # if nearmatch allowed
+   unless ($similar==1) {
+    debug (2, "\tp_statz: Missing input file $inputfile in /mem, sending 400");
+    do_error($client, 400, $what, "\tp_statz: Missing input file $inputfile in /mem");
+    return;
+   } # unless similar
+  }
+  if (defined($mem{$inputfile})) {
+   if (defined($mem{$inputfile}{'data'})) {
+    # 1st possibibility: get the data from %mem
+    @inputfile_lines=split("\n", $mem{$inputfile}{'data'});
+    $inputfile_ok=1;
+    debug (5, "\tp_statz: Copied " . scalar(@inputfile_lines) . " lines of inputfile");
+   } else {
+    $inputfile_ok=-1;
+   } # unless -f
+  } # defined $mem{$inputfile}
+ } elsif ( $inputfile =~ m/\// ) { # defined $mem{$inputfile}
+   # for any / present in the path, passing the -f check is sufficient
+   # FIXME: should check eval_inputfile
+   if (-f $inputfile) {
+    open (my $inputfile_fh, "<", $inputfile) or (die "could not open file $inputfile: $!");
+    my $i=0;
+    $inputfilefh_toclose=1;
+    # 2nd possibility: get the data from a file, line by line
+    # read in a loop line by line, could be a cool but less legible one-liner if wanted
+    while (my $line = <$inputfile_fh>) {
+     $inputfile_lines[$i]=$line;
+     $i++;
+    }
+   $inputfile=1;
+  } else { # if -f
+   $inputfile=-1;
+  } # if -f
+ } # if inputfile match
+
+ # in either case, either we have the data or we don't
+ # if we don't, say way
+ if ($inputfile_ok==1) {
+  debug (5, "p_statz: got " . scalar(@inputfile_lines) . " lines of data");
+  if ($inputfilefh_toclose==1) {
+   # FIXME: close() on unopened filehandle
+  # close ($inputfilefh_toclose) or debug (0, "p_statz: problem closing $inputfile: $!");
+  } # if close needed
+ } else {
+ # FIXME: should be more precise about the issue
+  debug (-1, "\tp_statz: inputfile $inputfile must either be in /mem, in the /zip through served_dirs " . join(",", keys(%served_dirs)) . " or in an accessible dir in $cwd (if // is allowed) or / (if /// is allowed)");
+  do_error($client, 400, $what, "\tp_statz: input file must be a filename");
+  return;
+ }
+
+ ############################ STATS.PL
+ ################################################################
+ # step 1: assemble the data we've got
+ my %groups;    # hash, counting elements for each group
+ my %stats;     # hash, with stats data
+ my @data;       # where the data is stored
+ my $fields_nbr; # for the whole file, to detect sudden changes indicate of a format error
+ my $line_num=0; # line counter for debugging with the above
+
+ foreach my $line (@inputfile_lines) {
+  # strip CRLF better than chomp
+  $line =~ s/[\x0A\x0D]$//g;
+  my @line_read;
+  @line_read=split (/\t/, $line);
+  # store by dereferencing the array
+  $data[$line_num] = \@line_read;
+  # then basic check
+  if ($line_num==0) {
+   # store the number of fields to check
+   $fields_nbr=$#line_read;
+  } else {
+   # check if the size differs from what's expected, complain
+   if ($#line_read != $fields_nbr) {
+    debug(3, "p_statz: ERROR: Expected " . $fields_nbr . " fields but read " . $#line_read . " fields on line " . $line_num . "\n");
+   } # line_read != fields_nbr
+  } # line_num != 0
+  $line_num=$line_num+1;
+ } # foreach
+
+ # Secondary check: refuse to process without any data
+ if (scalar (@data)<2) {
+  debug (0, "p_statz: cant do without data");
+  do_error($client, 400, $what, "\tp_statz: cant do with no data");
+ }
+ # set the number of lines
+ my $line_nbr=$line_num;
+
+ debug (5, "p_statz: Step 1: Read $line_num lines");
+ debug (50, Dumper(@data));
+
+ ################################################################
+ # step 2: create groups using the fields matching what we want
+
+ # for ingredients (cas and names): one field
+ my $cas_field=0;
+ # for hazard codes: multiple fields 
+ my $code_field=0;
+ my @code_fields;
+
+ # for summary statistics
+ my %operator_counts;
+
+ # restart from 0
+ $line_num=0;
+
+ while ($line_num < $line_nbr) {
+  # Construct the hash objects
+  my $group =$data[$line_num][0];
+  my $type  =$data[$line_num][1];
+  my $number=$data[$line_num][2];
+  my $weight=$data[$line_num][3];
+  my $source=$data[$line_num][4];
+  # do not tolerate numbers without digits (!)
+  # WONTFIX: we could use looks_like_a_number() from Scalar::Utils for things like 1e5
+  # however, numbers in engineering notation are less likely than database errors
+  # so let's do that more simply
+  unless ($number =~ m/[0-9]+/) {
+   if ($debug >0 ) {
+    debug(5, "p_statz: Skipping empty value on line $line_num of $type for $group from $source\n"); 
+   }
+   $line_num = $line_num+1;
+   next;
+  }
+
+  # Update the cardinality of the group
+  if (defined($groups{$group})) {
+   $groups{$group}=$groups{$group}+1;
+  } else {
+   $groups{$group}=1;
+  }
+
+  # Update the summary statistics
+  if (defined($operator_counts{$type})) {
+   $operator_counts{$type}=$operator_counts{$type}+1;
+  } else {
+   # initialize
+   $operator_counts{$type}=1
+  }
+
+  # type can be an equality or a predicate
+  # for equalities, tolerate multiple formats: single equal, double equal or nothing at all
+  if      ($type =~ m/^==$/ or $type =~ m/^=$/ or $type =~ m/^$/) {
+  # equalities directly go in values
+   push(@{ $stats{$group}{values} }, $number);
+   push(@{ $stats{$group}{values_weights} }, $weight);
+  } elsif ($type =~ m/^\<$/) {
+   push(@{ $stats{$group}{predicates_lt} }, $number);
+   push(@{ $stats{$group}{predicates_lt_weights} }, $weight);
+  } elsif ($type =~ m/^\<=$/) {
+   push(@{ $stats{$group}{predicates_le} }, $number);
+   push(@{ $stats{$group}{predicates_le_weights} }, $weight);
+  } elsif ($type =~ m/^\>$/) {
+   push(@{ $stats{$group}{predicates_gt} }, $number);
+   push(@{ $stats{$group}{predicates_gt_weights} }, $weight);
+  } elsif ($type =~ m/^\>=$/) {
+   push(@{ $stats{$group}{predicates_ge} }, $number);
+   push(@{ $stats{$group}{predicates_ge_weights} }, $weight);
+  } elsif ($type =~ m/^\!=$/) {
+   push(@{ $stats{$group}{predicates_ne} }, $number);
+   push(@{ $stats{$group}{predicates_ne_weights} }, $weight);
+  }
+  $line_num=$line_num+1;
+ } # while line_num < line_nbr
+
+ debug(5, "p_statz: Step 2: Made " . scalar(keys(%groups)) . " groups, with the following equalities and inequalities types:\n");
+ foreach my $t (keys(%operator_counts)) {
+  debug(50, "\t- operator type '$t' has " . $operator_counts{$t} . " values");
+  debug(50, "\t\tgroups:");
+  debug(50, Dumper(%groups));
+  debug(50, "\t\tstats:");
+  debug(50, Dumper(%stats));
+ } # foreach
+
+ debug(5, "p_statz: Step 3: Using data to create a TSV with statistics:\n");
+ my @mem_outputfile;
+ # the output TSV format specification is the first line:
+ push (@mem_outputfile, "group\ttype\tcorrectmed_unweighted\tcorrected_med\tcorrected_med_pval\tcorrected_mean\tcorrected_stdev\traw_mean\traw_stdev\tmad\tmad_stdev\traw_med\traw_med_pval\tlow_boundary\ttop_boundary\tselected_values\tselected_values_weights\toutliers_values\toutliers_values_weights\tnbr_selected\tnbr_outliers\tnbr_total");
+
+ foreach my $group (sort keys (%groups)) {
+  my $mem_outputfile_line;
+  debug(50, "\t$group : "); # FIXME: remove
+  my @numbers;
+  my @numbers_weights;
+  if (defined($stats{$group}{values}) && scalar($stats{$group}{values})>0 && defined($stats{$group}{values_weights}) && scalar($stats{$group}{values_weights})>0) {
+   @numbers=$stats{$group}{values};
+   @numbers_weights=$stats{$group}{values_weights};
+  }
+
+  ################################################################ 
+  # We now have values, weights and a case number: compute stats
+  my %bs=basicstats(@numbers, @numbers_weights);
+
+  debug(10, Dumper(%bs));
+
+  # create a TSV, line per line
+  $mem_outputfile_line = "$group\t=";
+  my $correctmed_unweighted = $bs{med_unweighted};
+  my $correctmed = $bs{correctmed};
+  my $correctmedpval = $bs{correctmedpval};
+  $mem_outputfile_line .="\t$correctmed_unweighted\t$correctmed\t$correctmedpval";
+  # corrected mean
+  my $mean=$bs{mean};
+  # correctd stdev
+  my $stdev=$bs{stdev};
+  # raw mean and stdev
+  my $rawmean=$bs{rawmean};
+  my $rawstdev=$bs{rawstdev};
+  my $mad=$bs{mad};
+  my $madstdev=$bs{madstdev};
+  my $rawmed=$bs{rawmed};
+  my $rawmedpval=$bs{rawmedpval};
+  # the actual numbers
+  $mem_outputfile_line .="\t$mean\t$stdev\t$rawmean\t$rawstdev\t$mad\t$madstdev\t$rawmed\t$rawmedpval";
+  # then the selection criteria
+  my $lowbound=$bs{lowbound};
+  my $topbound=$bs{topbound};
+  $mem_outputfile_line .="\t$lowbound\t$topbound";
+  # then the list of numbers selected and excluded as outliers, to allow a quick inspection of how the sausage was made
+  my @selected_values = @{ ${bs}{selected_values} };
+  my $selected_values_list=join("|", @selected_values);
+  my @selected_values_weights = @{ ${bs}{selected_values_weights} };
+  my $selected_values_weights_list=join("|", @selected_values_weights);
+  $mem{$outputfile} .= ("\t$selected_values_list\t$selected_values_weights_list");
+  # TODO: may want to keep the weight of the outliers?
+  my @outliers_values=@{ $bs{outliers_values} };
+  my $outliers_values_list=join("|", @outliers_values);
+  my @outliers_values_weights=@{ $bs{outliers_values_weights} };
+  my $outliers_values_weights_list=join("|", @outliers_values_weights);
+  $mem_outputfile_line .= "\t$outliers_values_list\t$outliers_values_weights_list\t";
+  $mem_outputfile_line .= scalar(@selected_values);
+  $mem_outputfile_line .= "\t";
+  $mem_outputfile_line .= scalar(@outliers_values);
+  $mem_outputfile_line .= "\t";
+  $mem_outputfile_line .= scalar(@outliers_values)+scalar(@selected_values);
+  debug (50, "Adding to the other " . scalar(@mem_outputfile) . " lines : $mem_outputfile_line");
+  # Add to the lines
+  push (@mem_outputfile, $mem_outputfile_line);
+ } # foreach group
+
+ # Now save that in %mem
+ $mem{$outputfile}{'data'}=join("\n", @mem_outputfile);
+
+ my $roughsize; # Good enough
+ {
+  # Closure so that use bytes doesn't alter the default of returning length in characters
+  use bytes;
+  # Rought approximation, but then we don't need for Devel::Size qw(total_size)
+  local $Data::Dumper::Terse = 1;
+  $roughsize=length(Dumper($mem{$outputfile}{'data'}));
+ };
+ if ($roughsize>3) {
+  # Update the time of the last upload
+  $mem_last=time;
+  # And "save" the virtual fil size
+  $mem{$outputfile}{'size'}=$roughsize;
+  $mem{$outputfile}{'time'}=$mem_last;
+ }
+ # Do a redirect regardless, ideally should save stderr etc to %run
+ local *STDOUT = $client;
+ # FIXME: should use $cgi_ref->{'HTTP_REFERER'}
+ # FIXME: also it would be nice to remove these stupid exceptions
+ # like by putting that into the JS to make the spreadsheet more robust to errors
+ unless (defined($ENV{HTTP_REFERER})) {
+  print STDOUT "HTTP/1.1 303 See Other\r\n";
+  print STDOUT "Location: /html/spreadsheet.template.html\r\n";
+ } else {
+  debug (1, "\tp_statz: referrer " . $ENV{HTTP_REFERER});
+  #my $redirect=$ENV{HTTP_REFERER};
+  #$redirect=~s/\?.*//g;
+  #print "Location: $redirect?load=/mem/$outputfile\r\n";
+  if ($ENV{HTTP_REFERER} =~ m/spreadsheet.template.html/) {
+   print STDOUT "HTTP/1.1 303 See Other\r\n";
+   print STDOUT "Location: /html/spreadsheet.template.html?load=/mem/$outputfile\r\n";
+   debug (0, "\tp_statz: Sent 303 to /html/spreadsheet.template.html?load=/mem/$outputfile");
+   } else {
+   debug (0, "- Sent 303 to /html/spreadsheet.template.html");
+   }
+  # Force load:
+  #print "Location: /html/spreadsheet.template.html?load=$outputfile\r\n";
+ } # defined referrer
+ return;
+} # sub p_statz
+
 # Run any perl script from cgi/ with Eval::Save
 sub p_cgi {
  my $client=shift;
@@ -599,18 +1203,18 @@ sub p_cgi {
  # FIXME: should have 4 separate steps:
  # 0) get the actual data: differences between get and post
  # 1) apply_convention : convert //dir to ./dir
- # 2) may_exec: check if that's allowed by evaled_dirs (no /bin!) evaled_input (no cgi-bin/!)
- # 3) try_exec: actually do it
+ # 2) may_eval: check if that's allowed by evaled_dirs (no /bin!) evaled_input (no cgi-bin/!)
+ # 3) try_eval: actually do it
 
  ################# 0: Get the data
 
  my $uri = $cgi_ref->{'REQUEST_URI'};
  # FIXME: add a switch based on method for a get mode case like:
- # http://localhost:8765/bin/stats.pl?inputfile=/tsv/demo.input.tsv&output=demo.stats.tsv
+ # http://localhost:3210/bin/stats.pl?inputfile=/tsv/demo.input.tsv&output=demo.stats.tsv
  # then do the same thing with %content=get_uri_data($uri)
  # to parse the uri and convert to cmdline arguments
  # like: -inputfile /tsv/demo.input.tsv/ -outputfile demo.stats.tsv
- # to separate p_cgi into may_exec and try_exec which can be shared with g_cgi
+ # to separate p_cgi into may_eval and try_eval which can be shared with g_cgi
  my %content;
  my $what=$uri;
  # if ($uri =~ m/\.pl\?/ P
@@ -683,6 +1287,8 @@ sub p_cgi {
  } # what matches
  
  ################# 2: May exec
+ # FIXME: needless repetition for now, but will remind putting that in a sub
+ debug (1, "\tp_cgi: may_exec: what=$what inputfile=$inputfile outputfile=$outputfile");
 
  # First, check if the extension of what will run at least looks like an actual perl script
  #unless ($what =~ m/\.pl$/) {
@@ -697,7 +1303,7 @@ sub p_cgi {
   debug (-1, "\tp_cgi: $what must be a perl script existing in cgi/");
   do_error($client, 405, "$what", "Maybe the path is wrong");
  }
-
+ 
  # Then, check outputfile: simpler
  if ($outputfile =~ m/\// || scalar(split("\n", $outputfile))>1) {
   debug (-1, "\tp_cgi: outputfile must go to /mem by declaring just the filename");
@@ -705,14 +1311,14 @@ sub p_cgi {
  } elsif ($outputfile =~ m/^stdout$/) {
   debug (-1, "\tp_cgi: not support yet for when outputfile is the stdout");
   do_error($client, 400, $what, "\tp_cgi: outputfile must be a filename not stdout");
- } else {
+ } elsif (!(defined($outputfile) || length($outputfile)<2)) {
   #do_error($client, 400, $path, "Missing output file");
   #return;
   my ($second,$minute,$hour) = localtime();
   # Make sure it's prefixed by a 0 if it's only 1 digit
   $hour = sprintf("%02d",$hour);
   $minute = sprintf("%02d",$minute);
-  debug (0, "\tp_cgi: outputfile absent, replaced by: " . $hour . "h" . $minute . "m.tsv");
+  debug (0, "\tp_cgi: outputfile absent or just 1 character, so replaced by: " . $hour . "h" . $minute . "m.tsv");
   $outputfile=$hour . "h" . $minute . "m.tsv";
  }
 
@@ -762,9 +1368,16 @@ sub p_cgi {
    # FIXME: correct the JS code to add the prefix and remove the nearmatch feature
    if (1) { # if near match allowed
     foreach my $k (keys %mem) {
-     if ($k =~ m/$inputfile/) {
-      # FIXME: bad name in JS interface
-      debug (2, "\tp_cgi: Missing input file $inputfile in /mem, but found near match $k");
+     # It's nice there's an actual key, but data is required
+     # otherwise print $inputfile_fhtmp $mem{$inputfile}{'data'}) would fail
+     # and since it doesn't have a retry, might as well find the most suitable match now
+     if ($k =~ m/$inputfile/ && defined($mem{$k}{'data'})) {
+      # FIXME: bad name in JS interface: doesn't use the prefix so:
+      # p_mem_upload: Got 13h06m_demo.stats.tsv of text/plain; charset=UTF-8 size about 237 for content length 561
+      # (...)
+      # p_cgi: may_exec: what=/mnt/c/Users/Charlotte/Desktop/perlplebean/cgi/stats.pl inputfile=demo.stats.tsv outputfile=stats_demo.stats.tsv
+      # p_cgi: Missing input file demo.stats.tsv in /mem, but found near match 12h39m_demo.stats.tsv 
+      debug (2, "\tp_cgi: FIXME: due to bad JS Missing input file $inputfile in /mem, but found near match $k");
       $inputfile=$k;
       $similar=1;
      } # if k match
@@ -778,9 +1391,9 @@ sub p_cgi {
   }
   if (defined $mem{$inputfile}) {
    # We have an entry: try to materialize it into a tempfile
-   ($inputfile_fhtmp, $inputfile_name) = tempfile("inputfile_XXXX", UNLINK=>1);
+   ($inputfile_fhtmp, $inputfile_name) = tempfile("inputfile_XXXX", UNLINK=>0);
    binmode $inputfile_fhtmp;
-   if (print $inputfile_fhtmp "$mem{$inputfile}{'data'}") {
+   if (defined($mem{$inputfile}{'data'}) && print $inputfile_fhtmp $mem{$inputfile}{'data'}) {
     $inputfile_fhtmp->flush;
     $inputfile_ok=1;
     debug (0, "\tp_cgi: Copied $inputfile data to $inputfile_name");
@@ -822,19 +1435,23 @@ sub p_cgi {
  # At this point, the basics should be met:  we'll essentially do:
  #  $what $inputfilename $extraparameters > $outputfile
  # except outputfile will be in %mem
- debug (1, "\tp_cgi: try_eval: equivalent to $what $inputfile_name > /mem/$outputfile");
+ debug (1, "\tp_cgi: future eval: equivalent to $what $inputfile_name > /mem/$outputfile");
 
  # FIXME: add a w factor from other parameters etc
  my ($errcode, $chld_out, $chld_err) = try_eval ($what, $inputfile_name); # ,%cmdlineoptions)
  if (defined($errcode)) {
-  debug (1, "\tp_cgi: try_eval: returned errcode=$errcode");
+  debug (1, "\t\tp_cgi: try_eval returned errcode=$errcode");
  }
- #if (defined($chld_out)) {
- # debug (30, "\tp_cgi: try_eval: obtained stdout:\n" . $chld_out);
- #}
- #if (defined($chld_err)) {
- # debug (30, "\tp_cgi: try_eval: obtained stderr:\n" . $chld_err);
- #}
+ if (defined($chld_out)) {
+  debug (30, "\t\tp_cgi: try_eval obtained stdout:\n" . $chld_out);
+ } else {
+  debug (3, "\t\tp_cgi: try_eval PROBLEM: didnt get stdout");
+ }
+ if (defined($chld_err)) {
+  debug (30, "\t\tp_cgi: try_eval obtained stderr:\n" . $chld_err);
+ } else {
+  debug (3, "\t\tp_cgi: try_eval PROBLEM: didnt get stderr");
+ }
 
  my $roughsize; # Good enough
  {
@@ -854,10 +1471,16 @@ sub p_cgi {
    $mem{$outputfile}{time}=$mem_last;
   }
  }
-  debug (3, "\tp_cgi: try_eval: obtained stdout: ~ $roughsize bytes in " . scalar(split("\n",$chld_out)) . " lines");
+  debug (3, "\t\tp_cgi: try_eval obtained stdout: ~ $roughsize bytes");
+  if (defined($chld_out)) {
+   debug (3, "\t\tp_cgi: try_eval made of " . scalar(split("\n",$chld_out)) . " lines");
+  }
 
  # Do a redirect regardless, ideally should save stderr etc to %run
  local *STDOUT = $client;
+ # FIXME: should use $cgi_ref->{'HTTP_REFERER'}
+ # FIXME: also it would be nice to remove these stupid exceptions
+ # like by putting that into the JS to make the spreadsheet more robust to errors
  unless (defined($ENV{HTTP_REFERER})) {
   print STDOUT "HTTP/1.1 303 See Other\r\n";
   print STDOUT "Location: /html/spreadsheet.template.html\r\n";
@@ -883,6 +1506,7 @@ sub p_cgi {
 sub try_eval {
  my $what=shift;
  my $inputfile_name=shift; # FIXME: should be optional
+
  # Perl reuses allocated memory whenever possible
  # cf https://www.oreilly.com/library/view/practical-mod_perl/0596002270/ch10.html
  # So cal prealloc to avoid any malloc issues with slow growing (line buffed) stdout
@@ -916,22 +1540,34 @@ sub try_eval {
   # Safe is slower and not working that well anyway
   # would also require PerlIO::Layer and a buch of XS
   my $eval = Eval::Safe->new(safe=>0, strict=>1, warnings=>1);
-  # cook a suitable ARGV
+  # cook an ARGV that's suitable to the diamond operator (so alternative without materialize: use stdin)
   local @ARGV;
-  $ARGV[0]=$inputfile_name;
+  $ARGV[0]=$cwd . "/" . $inputfile_name;
   # FIXME: put params in $ARGV[1] etc: assemble an array
   eval {
-   # Then try to do it
+   my $argv0size = (stat($ARGV[0])) [7];
+   my $argv0date = (stat($ARGV[0])) [10];
+   my $what_size = (stat($what)) [7];
+   my $what_date = (stat($what)) [10];
+   print STDERR "what=$what is size=$what_size date=$what_date\n";
+   print STDERR "argv0=$ARGV[0] is size=$argv0size date=$argv0date\n";
+   print STDERR "ARGV:\n";
+   print STDERR Dumper(@ARGV);
+   print STDERR "what:\n";
+   print STDERR Dumper($what);
+   # Then try to do it safely
+   #$retval = do ($what);
+   # FIXME: for some reason, not ok in APE
    $retval = $eval->do ($what);
   };
  }
  # Let's see what this got us
   if ($exit_ignored) {
- debug (1, "\tp_cgi: $what called exit($exit_ignored)");
+ debug (1, "\t\ttry_eval: $what called exit($exit_ignored)");
  } elsif ( $@ ) { # if exit_ignored
-  debug (1, "\tp_cgi: $what got exception $@\n");
+  debug (1, "\t\ttry_eval: $what got exception $@\n");
  } else { # if $@
-  debug (1, "\tp_cgi: $what exited normally");
+  debug (1, "\t\ttry_eval: $what exited normally");
  } # if exit_ignored $@
  # Prepare the next use of the exit detection
  $exit_ignored=undef;
@@ -972,15 +1608,15 @@ sub g_mem {
  #  - as a wildcard: for serving the actual file content 200
  #  - as a standalone: for showing the index
  if ($uri =~m/mem\/.+/) {
-  debug (1, "\t\tg_mem passing $uri request to try_serve");
+  debug (1, "\t\tg_mem: passing $uri request to try_serve");
   # try serve will check for 404 etc
-  try_serve($client, $uri);
+  try_serve($client, \%cgi, $uri);
  } else {
   # Otherwise, make a nice index
   my $time_str =&httpdatentime;
   my $date_str =time2str($mem_last);
-  debug (1, "\t\tg_mem File list now:" . join(' ',keys(%mem)));
-  debug (2, "\t\tg_mem Last changed: $date_str");
+  debug (1, "\t\tg_mem: File list now:" . join(';;',keys(%mem)));
+  debug (2, "\t\tg_mem: Last changed: $date_str");
   print <<~"EOF"; # With variables
    HTTP/1.1 200 OK$ctrlr
    Date:  $time_str$ctrlr
@@ -1043,6 +1679,8 @@ sub g_mem_delete {
  $file =~ s/^\/mem_delete\///;
  # Would choke on spaces (%20) and other HTML encoded ascii, so decode the filename:
  $file =~ s/%(..)/pack("c", hex($1))/ge;
+ # FIXME: consider removing CR and LF that shouldn't be here if accidentally present in the filename
+ # (which shouldn't happen, but you never know...)
  my $success=0;
  my $keys=scalar(keys(%mem));
  if (defined($mem{$file})) {
@@ -1050,7 +1688,7 @@ sub g_mem_delete {
   debug (0, "\t\tg_mem_delete removed $file from %mem now left with $keys entries");
   $success=1;
  } else {
-  debug (0, "\t\tg_mem_delete no $file in %mem with $keys entries");
+  debug (0, "\t\tg_mem_delete no $file in %mem with $keys entries: " . join("\n", keys(%mem)));
   $success=-1;
  }
  my $time_str =&httpdatentime;
@@ -1060,19 +1698,44 @@ sub g_mem_delete {
   # WARNING: this should NOT unconditionally send a 303:
   # otherwise the template spreadsheet will redirect when clicking on x to delete
   # Give 204 within an html file, 303 within /mem
-  debug (0, "\t\tg_mem_delete: Referer is $locr_str");
+  debug (0, "\t\tg_mem_delete: Referer is $locr_str, success=$success");
   # add the carriage return
   $locr_str= $locr_str . "\r\n";
   if ($locr_str =~ m/\/mem/ && $success>0) {
    # Success: go where wanted to
-   debug (0, "\t\tg_mem_delete: Sending 303 to $locr_str");
-   print "Location: $locr_str\r\n\r";
+   debug (0, "\t\tg_mem_delete: Sending 303 to $locr_str because success=$success");
+   #print "Location: $locr_str\r\n\r"; WRONG: need headers
+   print <<~"EOF";
+    HTTP/1.1 303 See Other$ctrlr
+    Location: $locr_str$ctrlr
+    Date:  $time_str$ctrlr
+    Pragma: no-cache$ctrlr
+    Cache-control: no-cache$ctrlr
+    Server: $server$ctrlr
+    Last-Modified: $date_str$ctrlr
+    Accept-Ranges: none$ctrlr
+    $ctrlr
+    EOF
   } elsif ($locr_str =~ m/\/mem_delete/ && $success <0) {
    # Failure: the html content could be stale, refresh
-   print "Location: /mem\r\n\r";
+   #print "Location: /mem\r\n\r"; WRONG: need headers
+   debug (0, "\t\tg_mem_delete: Sending 303 default to /mem because failure: success=$success");
+   #print "Location: $locr_str\r\n\r";
+   print <<~"EOF";
+    HTTP/1.1 303 See Other$ctrlr
+    Location: /mem$ctrlr
+    Date:  $time_str$ctrlr
+    Pragma: no-cache$ctrlr
+    Cache-control: no-cache$ctrlr
+    Server: $server$ctrlr
+    Last-Modified: $date_str$ctrlr
+    Accept-Ranges: none$ctrlr
+    $ctrlr
+    EOF
   } elsif ($locr_str=~ m/template.html/) {
   # Anything else could make something bad happen in the template spreadsheet
   # (303: would switch to this page, 200: would display a blank page etc.
+  # FIXME: it'd be nice to make the JS more robust to remove this stupid exception
    debug (0, "\t\tg_mem_delete: Sending 204 since referrer matches .template.html");
    print "HTTP/1.1 204 No Content\r\n\r";
   } # if match
@@ -1134,7 +1797,7 @@ sub p_mem_upload {
   $mem_last=time;
   # Say what we got to check it's about right
   debug (2, "\t\tp_mem_upload: Got $filename of $filetype size about $roughsize for content length " . $cgi_ref->{'CONTENT_LENGTH'});
-  debug (1, "\t\tp_mem_upload: File list now:" . join('\n',keys(%mem)));
+  debug (1, "\t\tp_mem_upload: File list now:" . join(';;',keys(%mem)));
  } else { # size >6
   debug (2, "\t\tp_mem_upload: Silently ignoring empty $filename of $filetype size about $roughsize for content length " . $cgi_ref->{'CONTENT_LENGTH'});
  } # size >6
@@ -1277,8 +1940,137 @@ EOF
 } # sub g_upload
 
 #############################################################################
+# Spreadsheet related subs
+#############################################################################
+
+## basic stats
+sub basicstats {
+ use List::Util qw( min max );
+ use POSIX qw (ceil floor);
+ use Statistics::Descriptive::Weighted;
+ use Statistics::Descriptive;
+
+ debug (90, "Raw inputs:");
+ debug (90, Dumper(@_));
+
+ # input is 2 arrays
+ my @input_values         = @{ $_[0] };
+ my @input_values_weights = @{ $_[1] };
+
+ debug (90, "Inputs:");
+ debug (90, Dumper(@input_values));
+ debug (90, "Weights:");
+ debug (90, Dumper(@input_values_weights));
+
+ # output is a hash that we will assemble with various objects, like statistical measures
+ my %summary;
+ # it will include a selection of input values and weights, that'll be used to make more stats
+ my @selected_values;
+ my @selected_values_weights;
+ # and it will separate the outliers
+ my @outliers_values;
+ my @outliers_values_weights;
+ # and make a list of unique outliers
+ my @outliers_unique;
+
+ # weights are in second argument
+ my $stat  = Statistics::Descriptive::Weighted::Full->new();
+ $stat->add_data(\@input_values, \@input_values_weights);
+
+ # The raw statistics
+ my $rawmean  = $stat->mean();                    ## weighted mean
+ my $rawvar   = $stat->variance();                ## weighted sample variance (unbiased estimator)
+
+ my $rawstdev = sqrt($rawvar);
+# my $bvar   = $stat->biased_variance();        ## weighted sample variance (biased)
+ my $rawmed   = $stat->median();                  ## weighted sample median
+ my $rawmedpval  = $stat->rtp($rawmed);           ## returns right tail probability
+
+ # The array of absolute deviations
+ my @ad;
+ foreach my $val (@input_values) {
+  push (@ad, abs($val-$rawmed));
+ }
+
+ my $stat_ad  = Statistics::Descriptive::Weighted::Full->new();
+ $stat_ad->add_data(\@ad, \@input_values_weights);
+ my $mad = $stat_ad->median();
+ # instead of estimating sigma from the sample, give a consistent estimator of the stddev:
+ # sigmahat=1.4826*mad
+ # cf https://en.wikipedia.org/wiki/Median_absolute_deviation#Relation_to_standard_deviation
+ # 1.4826 is the constant scale factor, assuming a normal distribution by the LLN)
+ my $madstdev=(1.4826)*$mad;
+ # Acceptance criteria to flag outliers
+ # 2 sigmas 95% confidence interval, as usual
+ # cf https://en.wikipedia.org/wiki/97.5th_percentile_point
+ # Except that instead of the usual xbar +- 1.96 stdev,
+ # we can use the more robust med +- 1.96 madstdev
+ # FIXME: use a w scaling factor to artificially enlarge or tighten the interval
+ my $plusminus=1.96*$madstdev;
+ #my $plusminus=$madstdev;
+ my $topbound=$rawmed+$plusminus;
+ my $lowbound=$rawmed-$plusminus;
+
+ my $val_index=0; # to synchronize the list of weight with the selected values
+ foreach my $val (@input_values) {
+  if ($val > $topbound || $val < $lowbound) {
+   # print STDERR "outlier as $val > $topbound || $val < $lowbound\n";
+   push (@outliers_values, $val);
+   push (@outliers_values_weights, $input_values_weights[$val_index]);
+   $val_index=$val_index+1;
+  } else { # not within bounds
+   push (@selected_values, $val);
+   push (@selected_values_weights, $input_values_weights[$val_index]);
+   $val_index=$val_index+1;
+  } # if bounds
+ } # foreach
+ 
+ # return the important numbers: raw statistics first
+ $summary{rawmean}=$rawmean;
+ $summary{rawstdev}=$rawstdev;
+ $summary{rawmed}=$rawmed;
+ $summary{rawmedpval}=$rawmedpval;
+ # then the selection critera
+ $summary{mad}=$mad;
+ # even if it's just multiplied by constant scale factor, save it as is
+ $summary{madstdev}=$madstdev;
+ # and likewise for the boundaries
+ $summary{topbound}=$topbound;
+ $summary{lowbound}=$lowbound;
+ # then the list of selected values and outliers
+ # dereference the arrays:
+ $summary{selected_values}=\@selected_values;
+ $summary{selected_values_weights}=\@selected_values_weights;
+ # $summary{rawad}=\@ad; # useless  to pass on
+ @outliers_unique=unique(@outliers_values);
+ $summary{outliers}=\@outliers_unique;
+ $summary{outliers_values}=\@outliers_values;
+ $summary{outliers_values_weights}=\@outliers_values_weights;
+ my $stat_corrected  = Statistics::Descriptive::Weighted::Full->new();
+ $stat_corrected->add_data(\@selected_values, \@selected_values_weights);
+ # and the most important: corrected mean and variance
+ my $mean  = $stat_corrected->mean();          ## weighted mean
+ my $var   = $stat_corrected->variance();      ## weighted sample variance (unbiased estimator)
+ my $stdev = sqrt($var);
+ $summary{mean}=$mean;
+ $summary{stdev}=$stdev;
+ my $correctmed   = $stat_corrected->median();                 ## weighted sample median
+ my $correcmedpval  = $stat_corrected->rtp($correctmed);       ## returns right tail probability
+ $summary{correctmed}=$correctmed;
+ $summary{correctmedpval}=$correcmedpval;
+ my $stat_corrected_unweighted  = Statistics::Descriptive::Full->new();
+ $stat_corrected_unweighted->add_data(\@selected_values);
+ my $med_unweighted = $stat_corrected_unweighted->median();
+ # WONTFIX: duh, no we can't do pval on unweighted, meaningless lol
+ # my $med_unweighted_pval  = $stat_corrected_unweighted->rtp($med_unweighted);              ## returns right tail probability
+ $summary{med_unweighted} = $med_unweighted;
+ return (%summary);
+} # basicstats
+
+#############################################################################
 # Other subs
 #############################################################################
+
 
 # Create a nicely formatted time string from the current epoch
 sub httpdatentime {
@@ -1288,7 +2080,8 @@ sub httpdatentime {
 # Turn a legible IP into a binary
 sub binip {
  my ($ip, $ipversion) = @_;
- if ($ipversion == 4) {
+
+ if ($ipversion == 3) {
   return unpack('B32', pack('C4C4C4C4', split(/\./, $ip)));
  }
  $ip =~ s/://g;
@@ -1302,6 +2095,26 @@ sub binip {
 # FIXME: not working yet
 sub unbinip {
  my ($ip, $version) = @_;
+if (1) {
+use constant AF_INET => 2; #from /usr/include/x86_64-linux-gnu/bits/socket.h
+
+#(my $remote_port, $remote_addr) = unpack("na", $remote_addr); # n == big-endian 16 bits
+my $addr_family = unpack("v", $ip); # v == little-endian 16 bits
+
+if ($addr_family == AF_INET) { # AF_INET means IPv4
+        #decode remaining
+        my @decoded_addr = unpack("xxnCCCC", $ip); # xx == skip 2 bytes (for addr family), n == big-endian 16 bits, C = byte
+        #print("Remote port: $decoded_addr[0]\n");
+        my $ipstr = join(".", @decoded_addr[1..4]);
+        #print("Remote IP: $ipstr\n");
+        return ($ipstr);
+} else { # AF_INET
+        #print("Unknown address family\n"); #TODO ipv6 etc...
+        return ("unknown");
+} # AF_INET
+
+} else { # if 0
+ # FIXME: until can fix that later later
  unless (defined($version)) {
   if (length($ip)<=32) {
    $version=4;
@@ -1324,6 +2137,7 @@ sub unbinip {
   # otherwise assume IPv6
  return join(':', unpack('H4H4H4H4H4H4H4H4', pack('B128', $ip)));
  }
+} # if 0
 }
 
 # Convert a unicode to the HTML format
@@ -1762,7 +2576,8 @@ sub do_error {
 # Serve file or directories, no support for compression as payloads are already zipped in the APE
 # TODO: still, could be nice to add decompression for compressed local files
 sub try_serve {
- my ($client, $convention)=@_;
+ my ($client, $cgi_ref2, $convention)=@_;
+ my %cgi = %{ $cgi_ref2 };
  local *STDOUT = $client;
  # FIXME: lol
  my $path = sprintf ("%s", $convention);
@@ -1774,6 +2589,8 @@ sub try_serve {
  $path=~s/(\.html|\.cgi)\?.*/$1/g;
  # Would choke on spaces (%20) and other HTML encoded ascii, so decode that:
  $path =~ s/%(..)/pack("c", hex($1))/ge;
+
+ ######################### 1. special case for mem
  # Special case for /mem: serve the uploaded content as files
  if ($path =~ m/^\/mem\//) {
   my $file=$path;
@@ -1784,43 +2601,70 @@ sub try_serve {
     # We can be sure the payload will be UTF-8 since /mem content is fed by perplebean
    $mimetype=$mimetype . "; charset=UTF-8";
   } # if text, json or javascript
+  unless (defined $mimetype) {
+   debug (-1, "\t\ttry_serve: Impossible to guess mimetype of $path, assuming text/plain");
+   # FIXME: maybe should have a different assumption like binary or octet-stream?
+   $mimetype="text/plain; charset=UTF-8";
+  } # defined mimetype
   $file=~s/^\/mem\///;
  # Would choke on spaces (%20) and other HTML encoded ascii, so decode the filename:
   $file =~ s/%(..)/pack("c", hex($1))/ge;
   # First, /mem
-  if (defined($mem{$file})) {
-    # We have the file content, so serve it!
-    my $time_str =&httpdatentime;
-    my $date_str =time2str($mem{$file}{time});
-    # But first cook a header
-    print <<~"EOF";
-     HTTP/1.1 200 OK$ctrlr
-     Date:  $time_str$ctrlr
-     Pragma: no-cache$ctrlr
-     Cache-control: no-cache$ctrlr
-     Server: $server$ctrlr
-     Content-Type: $mimetype; charset=UTF-8;
-     Last-Modified: $date_str$ctrlr
-     Accept-Ranges: none$ctrlr
-     $ctrlr
-     EOF
+  if (defined($mem{$file}) && defined($mem{$file}{data})) {
+   # We have the file content, so serve it!
+   my $time_str =&httpdatentime;
+   my $date_str =time2str($mem{$file}{time});
+   # But first cook a header
+   print <<~"EOF";
+    HTTP/1.1 200 OK$ctrlr
+    Date:  $time_str$ctrlr
+    Pragma: no-cache$ctrlr
+    Cache-control: no-cache$ctrlr
+    Server: $server$ctrlr
+    Content-Type: $mimetype; charset=UTF-8;
+    Last-Modified: $date_str$ctrlr
+    Accept-Ranges: none$ctrlr
+    $ctrlr
+    EOF
    # Then give the payload
-   if ( print $mem{$file}{data} ) {
-    debug (2, "\t\ttry_serve: Served $file from $path");
-   } else {
-    debug (2, "\t\ttry_serve: 400 on $file from $path");
-    do_error ($client, 400, $path, "error");
-   }
+   print $mem{$file}{data};
+   debug (2, "\t\ttry_serve: Served $file from $path");
    close (STDOUT);
+   $client->force_last_request;
    return;
-  } else { # if defined mem file
+  } else { # defined mem{$file} && defined mem{$file}{data}
+   debug (2, "\t\ttry_serve: Cant serve $file from $path");
+   my $referer=$cgi{'HTTP_REFERER'};
+   #my $referer=$cgi_ref2->{'HTTP_REFERER'};
+   if (defined($referer)) {
+    debug (2, "\t\ttry_serve: error caused by referer: $referer");
+    # Anything else could make something bad happen in the template spreadsheet
+    #if ($referer =~ m/template.html/) {
+    # debug (2, "\t\ttry_serve: Giving up because template");
+    # close (STDOUT);
+    # return;
+    #} # referer match template
+    # FIXED: The template is much more resilient now, can remove this stupid exception
+   } # defined referer
    debug (2, "\t\ttry_serve: 404 on $file from $path");
    do_error ($client, 404, $path, "absent");
    close (STDOUT);
    return;
-  } # if defined mem file
+  } # defined mem{$file} && defined mem{$file}{data}
+#    print <<~"EOF";
+#     HTTP/1.1 303 See Other$ctrlr
+#     Location: $locr_str$ctrlr
+#     Date:  $time_str$ctrlr
+#     Pragma: no-cache$ctrlr
+#     Cache-control: no-cache$ctrlr
+#     Server: $server$ctrlr
+#     Last-Modified: $date_str$ctrlr
+#     Accept-Ranges: none$ctrlr
+#     $ctrlr
+#    EOF
  } # if path mem
 
+ ######################### 2. general case for files
  # then, normal file: either from /zip or from an allowed list of local paths
  # With normal files, save the raw path before prefixing it as needed with /zip or $cwd
  # FIXME: lol
@@ -1828,9 +2672,9 @@ sub try_serve {
  # Within APPerl, the files are given by cosmo from the /zip folder
  if ($^O =~ m/^cosmo/) {
   # FIXME: test these URL in cosmo mode:
-  # http://localhost:8765/zip
-  # http://localhost:8765//
-  # http://localhost:8765///
+  # http://localhost:3210/zip
+  # http://localhost:3210//
+  # http://localhost:3210///
   my $exception_to_zip=0;
   # Check if we shouldn't add /zip:
   # either because in served_local or server_local_wildcard
@@ -2127,7 +2971,7 @@ sub http_dispatcher {
   $cgi{'SERVER_PORT'    } = $configurable{'listen_port'};
   my ($remote_port, $remote_addr) = sockaddr_in(getpeername $client);
   # FIXME: fix unbinip
-  $cgi{'REMOTE_ADDR'    } = unbinip($remote_addr);
+  $cgi{'REMOTE_ADDR'    } = unbinip($remote_addr, 4);
   $cgi{'REMOTE_PORT'    } = $remote_port;
   # The FQDN of the host making the request would require extra effort to resolve it
   #$cgi{'REMOTE_HOST'    } = gethostbyaddr $ip_addr, AF_INET;
@@ -2399,7 +3243,7 @@ sub http_dispatcher {
 
     # If exiting as authorized, wasn't caught as a violation (!)
     # So try to serve the content if the filesystem permissions allow it, 404 if it doesn't exists
-    try_serve($client, $convention);
+    try_serve($client, \%cgi, $convention);
    } # if handler
   } # if method match
 
@@ -2420,7 +3264,7 @@ sub http_dispatcher {
 
 # FIXME: BEGIN requires moving %chld, $daemon and maybe others to above the wall
 #BEGIN {
-#} # BEGIN block 2
+#} # BEGIN block 3
 sub main {
  if (-f 'mem.bin') {
   my $date_str = time2str((stat('mem.bin')) [10]);
@@ -2440,9 +3284,25 @@ sub main {
     print "Not restoring empty %mem from $cwd/mem.bin dated $date_str\n";
    }
    foreach my $file (keys %mem) {
-    my $filesize=$mem{$file}{size};
-    my $filetime_str =time2str($mem{$file}{time});
-    print "\t/mem/$file $filetime_str $filesize b\n";
+    my $filesize;
+    if (defined($mem{$file}{size})) {
+     $filesize=$mem{$file}{size};
+    } else {
+     # we shouldn't have undef unless there was a crash
+     debug (0, "Removing suspicious empty file: $file\n");
+     delete ($mem{$file});
+     print Dumper(%mem);
+    }
+    my $filetime_str;
+    if (defined($mem{$file}{time})) {
+     $filetime_str=time2str($mem{$file}{time});
+    } else {
+     debug (0, "Removing suspicious intemporal file: $file\n");
+     delete ($mem{$file});
+    }
+    if (defined($filetime_str) && defined($filesize)) {
+     print "\t/mem/$file $filetime_str $filesize b\n";
+    }
    } # foreach file
   } # unless retrieve
  } # file mem.bin
@@ -2461,16 +3321,19 @@ sub main {
  # cf https://metacpan.org/pod/Net::MDNS::Server https://metacpan.org/pod/Net::Bonjour::Entry
  # also see https://gist.github.com/vasi/bd46ff3ddb099f1b9a8a56923b2c4d6f
  #use Net::MDNS::Server ':all';
- #service("perlplebin.local", "127.0.0.1", 8765, "http", "tcp");
+ #service("perlplebin.local", "127.0.0.1", 3210, "http", "tcp");
  # for tests: # https://serverfault.com/questions/118652/how-to-use-bonjour
- # dns-sd -R PerlPleBean _http._tcp local 8765
+ # dns-sd -R PerlPleBean _http._tcp local 3210
  showntell;
  # After it's run, say what and where:
  # Use the old interface to avoid IO::Interface::Simple which requires a XS
  # https://metacpan.org/pod/IO::Interface
  # It would be helpful in case there's a routed IP somewhere, to complain about it
- my @interfaces = $daemon->if_list;
- print "Started HTTP listener on " . join(",",@interfaces) . " at " . $daemon->url . "\n";
+
+ # FIXME: IO::Interface required
+ #my @interfaces = $daemon->if_list;
+ #print "Started HTTP listener on " . join(",",@interfaces) . " at " . $daemon->url . "\n";
+ print "Started HTTP listener at " . $daemon->url . " as http://" . $configurable{listen_name} . ":" . $configurable{listen_port} . "\n";
  # FIXME: use showntell
  # Hash containing the children pid
  my %chld;
@@ -2528,5 +3391,133 @@ while (1) {
  } # if configurable nbr_childre
  } #  # while 1
 } # sub start
+
+sub fingerprint {
+ # Detect the OS based on %ENV
+ #  4 measures for each of Windows, WSL, Linux, MacOS:
+ # - 2 very precise (values of variables) worth 10 points
+ # - 2 less precise (existence of variables) worth 5 points
+ # Expected total: 30 points
+ # Special case for Linux: replace 1 precise measurement by 10 rough ones worth about 1 point each
+ #
+ ######################### Windows
+ my $win=0;
+
+ if ( defined($ENV{'OS'}) && $ENV{'OS'} =~ m/^Windows/) {
+  $win=+10;
+ }
+ if ( defined ($ENV{'WINDIR'}) && $ENV{'WINDIR'} =~ m/[A-Z]:\\Windows/i) {
+  $win+=10;
+ }
+ if (defined($ENV{'PROGRAMFILES'})) {
+  $win+=5;
+ }
+ if (defined($ENV{'USERPROFILE'})) {
+  $win+=5;
+ }
+
+ ######################## WSL
+ my $wsl=0;
+
+ if (defined ($ENV{'WSL_INTEROP'}) && $ENV{'WSL_INTEROP'} =~ m/^\/run\/WSL/) {
+  $wsl+=10;
+ }
+ if (defined ($ENV{'UNAME'}) && $ENV{'UNAME'} =~ m/microsoft-standard-WSL/) {
+  $wsl+=10;
+ }
+ if ($ENV{'WSL_DISTRO_NAME'}) {
+  $wsl+=5;
+ }
+ if ($ENV{'WSLENV'}) { # not ideal: also true in cmdprompt and powershell
+  $wsl+=5;
+ }
+ 
+ ######################## MacOS
+ my $mac=0;
+ 
+ if (defined($ENV{'__CFBundleIdentifier'})) { # =~ m/com.apple.Terminal/ || com.googlecode.iterm2
+  $mac+=10;
+ }
+ if (defined($ENV{'DISPLAY'}) && $ENV{'DISPLAY'} =~ m/com.apple/) {
+  $mac+=10;
+ }
+ 
+ if (defined($ENV{'XPC_SERVICE_NAME'})) {
+  $mac+=5;
+ } elsif (defined($ENV{'XPC_FLAGS'})) {
+  $mac+=5;
+ }
+ if (defined($ENV{'TERM_PROGRAM_VERSION'})) {
+  $mac+=5;
+ } elsif (defined($ENV{'TERM_PROGRAM'})) {
+  $mac+=5;
+ }
+ 
+ ######################## Linux proper
+ 
+ my $lnx=0;
+ 
+ if (defined($ENV{'DBUS_SESSION_BUS_ADDRESS'}) && $ENV{'DBUS_SESSION_BUS_ADDRESS'} =~ m/\/run\//) {
+  $lnx+=10;
+ }
+ if (defined($ENV{'XDG_RUNTIME_DIR'}) && $ENV{'XDG_RUNTIME_DIR'} =~ m/\/run\//) {
+  $lnx+=10;
+ } else {
+  # A typical linux distribution has about 13 XDG_ keys, so should get at least 10 points that way
+  foreach my $k (keys %ENV) {
+   if ($k =~ m/^XDG_/) {
+    unless ($k =~ m/^XDG_RUNTIME_DIR$/) {
+     $lnx++;
+    } # unless
+   } # if
+  } # foreach
+ }
+ 
+ if (defined($ENV{'GTK_IM_MODULE'}) || defined($ENV{'QT_IM_MODULE'})) {
+  $lnx+=5;
+ }
+ if (defined($ENV{'XMODIFIERS'})) {
+  $lnx+=5;
+ }
+ 
+ my $max = max ($win, $wsl, $mac, $lnx);
+ 
+ # report results
+ if ($debug>40) {
+  print "fingerprint WIN $win, WSL: $wsl, MAC: $mac, LNX: $lnx\n";
+ }
+ if ($win == $max) {
+  return ("win");
+ } elsif ($wsl == $max) {
+  return ("wsl");
+ } elsif ($lnx == $max) {
+  return ("lnx");
+ } elsif ($mac == $max) {
+  return ("mac");
+ } else {
+  return ("new");
+ }
+
+} # sub fingerprint
+
+my $perlplebean_url="http://perlplebean.local:3210/";
+my $hostos=fingerprint();
+if ($hostos =~ m/win/) {
+#if ($hostos =~ m/win/ || ($hostos =~ m/wsl/ && -f "/usr/bin/xdg-open")) {
+ print "Using start to open a browser to $perlplebean_url\n";
+ system ("start $perlplebean_url");
+} elsif ($hostos =~ m/lnx/ && -f "/usr/bin/xdg-open") {
+#} elsif (($hostos =~ m/wsl/ || $hostos =~ m/lnx/) && -f "/usr/bin/xdg-open") {
+ # TODO: WSL Interopability is disabled. Please enable it before using WSL.
+ # query that to switch as needed
+ print "Using xdg-open to open a browser to $perlplebean_url\n";
+ system ("xdg-open $perlplebean_url");
+} elsif ($hostos =~ m/mac/ && -f "/usr/bin/open") {
+ print "Using open to open a browser to $perlplebean_url\n";
+ system ("open $perlplebean_url");
+} else {
+ print "New OS, not opening a browser, go visit $perlplebean_url\n";
+}
+
 
 main;
