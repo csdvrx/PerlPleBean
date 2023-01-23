@@ -1,0 +1,173 @@
+--- ./cpan/lib/perl5/5.36.0/Net/DNS/Nameserver.pm	2022-12-30 09:49:15.000000000 -0600
++++ src/Nameserver.pm	2023-01-19 00:58:25.000000000 -0600
+@@ -121,7 +121,7 @@
+ 		#--------------------------------------------------------------------------
+ 		# Create the UDP Socket.
+ 		#--------------------------------------------------------------------------
+-
++unless (defined($self{MCastAddr})) {
+ 		print "Creating UDP socket $addr#$port - " if $self{Verbose};
+ 
+ 		my $sock_udp = inet_new(
+@@ -136,9 +136,43 @@
+ 		} else {
+ 			carp "Couldn't create UDP socket: $!";
+ 		}
+-
++}
+ 	}
+ 
++if (defined($self{MCastAddr})) {
++#--------------------------------------------------------------------------
++# Create the UDP MULTICAST Socket out of  foreach addr since at iface level
++#--------------------------------------------------------------------------
++use IO::Socket::Multicast;
++use constant DEFAULT_MULTICAST => 224.0.0.251;
++my $MultiCast = $self{MCastAddr} || [DEFAULT_MULTICAST];
++print "Creating UDP MULTICAST socket $MultiCast:$port - " if $self{Verbose};
++# FIXME: was LocalAddr=> $MultiCast then LocalAddr=> $LocalAddr then nothing
++# because that's needed for sending outgoing multicast
++# from https://metacpan.org/pod/IO::Socket::Multicast constructors:
++# To create a UDP socket suitable for sending outgoing multicast messages, call new() without arguments (or with Proto=>'udp'). To create a UDP socket that can also receive incoming multicast transmissions on a specific port, call new() with the LocalPort argument.
++my $sock_udp_mcast = IO::Socket::Multicast->new(Proto=>'udp', LocalPort => $port, ReuseAddr=>1);
++
++my $prev_lbk = $sock_udp_mcast->mcast_loopback(0);
++print "Loopback was $prev_lbk, set to 0 - " if $self{Verbose};
++#my $prev_ttl = $sock_udp_mcast->mcast_ttl(2);
++#print "TTL was $prev_ttl, set to 2 - " if $self{Verbose};
++print "Subscribing to MULTICAST - " if $self{Verbose};
++$sock_udp_mcast->mcast_add($MultiCast) or die "Couldn't add $$MultiCast: $!\n";
++# For some reasons, before it prevented reception, as if couldn't send and receive on the same socket?
++# No such problems with PeerPort
++print "Setting destination MULTICAST - " if $self{Verbose};
++$sock_udp_mcast->mcast_dest("$MultiCast:$port");
++my $curr_dst =  $sock_udp_mcast->mcast_dest or die "Couldn't set destination: $!\n";
++
++if ($sock_udp_mcast && defined ($curr_dst)) {
++ push @sock_udp, $sock_udp_mcast;
++ print "done.\n" if $self{Verbose};
++} else {
++ carp "Couldn't create UDP MULTICAST socket: $!";
++}
++}
++
+ 	#--------------------------------------------------------------------------
+ 	# Create the Select object.
+ 	#--------------------------------------------------------------------------
+@@ -232,7 +266,9 @@
+ #------------------------------------------------------------------------------
+ 
+ sub make_reply {
+-	my ( $self, $query, $sock ) = @_;
++        # FIXED: USELESS
++	#my ( $self, $query, $sock, $mcast ) = @_;
++	my ( $self, $query, $sock) = @_;
+ 
+ 	unless ($query) {
+ 		print "ERROR: invalid packet\n" if $self->{Verbose};
+@@ -272,9 +308,25 @@
+ 		print "query $id : $qname $qclass $qtype\n" if $self->{Verbose};
+ 
+ 		my $peer = $sock->peerhost;
++                # FIXED: USELESS
++                #my $port = $sock->peerport;
++                #if ($mcast ==0 ) {
++                # print "Preparing normal udp reply\nfrom:\t" . $sock->sockhost . ":" . $sock->sockport . "\nto:\t$peer:$port\n" if $self->{Verbose};;
++                #} else {
++                # print "Preparing MULTICAST udp reply\nfrom:\t" . $sock->sockhost . ":" . $sock->sockport . "\nto:\t" . $self->{'MCastAddr'} . ":" . $self->{'LocalPort'} . "\nnot to:\t$peer:$port\n" if $self->{Verbose};
++                # $peer = $self->{'MCastAddr'};
++                # $port = $self->{'LocalPort'};
++                #}
++		#my $conn = {
++                #        peerhost => $peer,
++                #        peerport => $port,
++		#	protocol => $sock->protocol,
++		#	sockhost => $sock->sockhost,
++		#	sockport => $sock->sockport
++		#	};
+ 		my $conn = {
+-			peerhost => $peer,
+-			peerport => $sock->peerport,
++                        peerhost => $peer,
++                        peerport => $sock->peerport,
+ 			protocol => $sock->protocol,
+ 			sockhost => $sock->sockhost,
+ 			sockport => $sock->sockport
+@@ -449,14 +501,14 @@
+ 	my $buf = "";
+ 
+ 	$sock->recv( $buf, PACKETSZ );
+-	my ( $peerhost, $peerport, $sockhost ) = ( $sock->peerhost, $sock->peerport, $sock->sockhost );
++	my ( $peerhost, $peerport, $sockhost, $sockport ) = ( $sock->peerhost, $sock->peerport, $sock->sockhost, $sock->sockport );
+ 	unless ( defined $peerhost && defined $peerport ) {
+ 		print "the Peer host and sock host appear to be undefined: bailing out of handling the UDP connection"
+ 				if $self->{Verbose};
+ 		return;
+ 	}
+ 
+-	print "UDP connection from $peerhost:$peerport to $sockhost\n" if $self->{Verbose};
++	print "UDP connection from $peerhost:$peerport to $sockhost:$sockport\n" if $self->{Verbose};
+ 
+ 	my $query = Net::DNS::Packet->new( \$buf );
+ 	if ( my $err = $@ ) {
+@@ -465,17 +517,47 @@
+ 	}
+ 
+ 	my $reply = $self->make_reply( $query, $sock ) || return;
+-
+ 	my $max_len = ( $query && $self->{Truncate} ) ? $query->edns->size : undef;
++
+ 	if ( $self->{Verbose} ) {
+ 		local $| = 1;
+ 		print "Maximum UDP size advertised by $peerhost#$peerport: $max_len\n" if $max_len;
+-		print "Writing response - ";
+-		print $sock->send( $reply->data($max_len) ) ? "done" : "failed: $!", "\n";
+ 
+-	} else {
++# FIXED: seems needed only for the first time, now all this is done in new() at the socket creation
++#if (defined($self->{MCastAddr})) {
++#  print "Current peer on " . ref($sock) . "\nis:\t" . inet_ntoa($sock->peeraddr) . ":" .  $sock->peerport . "\n";
++#  my $prev = $sock->mcast_dest;
++#  unless (defined($prev) && length($prev)>0) {
++#   print "ABSENT multicast dest, so setting it\nto:\t224.0.0.251 - ";
++#   print $sock->mcast_dest('224.0.0.251:5353') ? "done" : "failed: $!", "\n";
++#  } else {
++#    unless (unbinip($prev) =~ m/224.0.0.251/) {
++#    print "NEED TO UPDATE multicast dest\nfrom:\t" . unbinip($prev) .  "\nto:\t224.0.0.251 - ";
++#    print $sock->mcast_dest('224.0.0.251:5353') ? "done" : "failed: $!", "\n";
++#   } else {
++#    print "BUT ALREADY HAS correct multicast dest\nto:\t224.0.0.251\n";
++#   }
++#  }
++#}
++
++if (defined($self->{MCastAddr})) {
++  # FIXED: needed pack even if less obvious than below
++  my $destination_packed = sockaddr_in($sock->sockport,inet_aton($self->{MCastAddr}));
++  print $sock->mcast_send( $reply->data($max_len), $destination_packed) ? "done MULTICAST" : "failed MULTICAST: $!", "\n";
++  # FIXED: alternative: visibly needed to pack DESTINATION with AF_INET otherwise ate the first 2 bytes of destination ip
++  #print $sock->send( $reply->data($max_len),0, $destination_packed) ? "done" : "failed: $!", "\n";
++ } else {
++  print $sock->send( $reply->data($max_len)) ? "done udp" : "failed udp: $!", "\n";
++ }
++
++	} else { # verbose
++         if (defined($self->{MCastAddr})) {
++                my $destination_packed = sockaddr_in($sock->sockport,inet_aton($self->{MCastAddr}));
++                $sock->mcast_send( $reply->data($max_len), $destination_packed);
++         } else {
+ 		$sock->send( $reply->data($max_len) );
+-	}
++         }
++	} # vebose
+ 	return;
+ }
+ 
+@@ -526,6 +608,7 @@
+ 
+ 			$self->readfromtcp($sock)
+ 					&& $self->tcp_connection($sock);
++                # FIXME: should have a separate mcast_udp_connection for udp multicast
+ 		} elsif ( lc($proto) eq "udp" ) {
+ 			$self->udp_connection($sock);
+ 		} else {
