@@ -1,0 +1,9 @@
+You can download XS modules here by using:
+
+        ../download_package.pl MOD::Ule ./
+
+Or from the main directory:
+
+        ./download_package.pl MOD::Ule src-xs/
+
+You can also let the Makefile (WIP) do that for you!
