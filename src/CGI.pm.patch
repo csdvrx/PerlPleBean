@@ -1,0 +1,31 @@
+--- ./cpan/perl5/lib/perl5/CGI.pm	2022-02-03 01:38:44.000000000 -0600
++++ ./cpan/perl5/lib/perl5/CGI.pm	2022-12-17 16:18:11.365383700 -0600
+@@ -2226,24 +2226,24 @@
+ 
+ # Escape HTML
+ sub escapeHTML {
+-     require HTML::Entities;
++     require HTML::HTML5::Entities;
+      # hack to work around  earlier hacks
+      push @_,$_[0] if @_==1 && $_[0] eq 'CGI';
+      my ($self,$toencode,$newlinestoo) = CGI::self_or_default(@_);
+      return undef unless defined($toencode);
+ 	 my $encode_entities = $ENCODE_ENTITIES;
+ 	 $encode_entities .= "\012\015" if ( $encode_entities && $newlinestoo );
+-	 return HTML::Entities::encode_entities($toencode,$encode_entities);
++	 return HTML::HTML5::Entities::encode_entities($toencode,$encode_entities);
+ }
+ 
+ # unescape HTML -- used internally
+ sub unescapeHTML {
+-    require HTML::Entities;
++    require HTML::HTML5::Entities;
+     # hack to work around  earlier hacks
+     push @_,$_[0] if @_==1 && $_[0] eq 'CGI';
+     my ($self,$string) = CGI::self_or_default(@_);
+     return undef unless defined($string);
+-	return HTML::Entities::decode_entities($string);
++	return HTML::HTML5::Entities::decode_entities($string);
+ }
+ 
+ # Internal procedure - don't use
