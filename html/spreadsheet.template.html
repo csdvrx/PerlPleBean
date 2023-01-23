@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<title>PerlPleBean SpreadSheet</title>
+<style>
+#drop_rectangle, #drop_line {
+  border:2px dashed #bbb;
+  border-radius:5px;
+  padding:10px;
+  font:14pt bold,"Vollkorn";
+  color:#bbb
+}
+#drop_line, #drop_zone {
+  -moz-border-radius:5px;
+  -webkit-border-radius:5px;
+}
+#drop_rectangle {
+  border:2px dashed red;
+  width: 200px;
+  height: 20px;
+  display:inline;
+  -moz-border-radius:5px;
+  -webkit-border-radius:5px;
+}
+form, h3, h4, h5, .rFile, #kept {
+     display:inline;
+     margin:0px;
+     padding:0px;
+}
+a { text-decoration: none }
+</style>
+<!-- The text-decoration none is to align the file links -->
+<link rel="stylesheet" type="text/css" href="/html/css/xspreadsheet.css"/>
+</head>
+<body>
+<!-- if changing anything below, adjust the viewHeight r factor in xspreadsheet.js: was 41, currently 75 -->
+<h3 align="left">Use:
+<!-- FIXME: instead of hardcoding, could discover files in tsv/ with a magic keyword like below  -->
+<input type="submit" value="/tsv/demo.stats.tsv" class="import" onclick="htmlssheet_loadremote(this.value);" />
+<a href="/mem">kept:</a>
+<div id="kept">
+<!-- what follows is a magic keyword replaced by the content of /mem that matches .tsv -->
+_-BUTTONSTSV-_
+</div>
+</form>
+</h3>
+<br /><br />
+<!-- files can be dropped to we can use a rectangle, a line, or a zone -->
+<div id="drop_zone">
+<!-- the drop zone covers most of the spreadsheet canvas to facilitate operations on touchscreens -->
+<!-- the upload form is decoupled from the drop_zone above and connected by handlers -->
+<form id="formupload" enctype="multipart/form-data" action="/mem_upload" method="post">
+<input type="file" id="uploadfile" name="uploadfile" class="uploadfile" multiple />
+or drop a file below!
+<input type="checkbox" id="dropautoupload" name="dropautoupload" label="autoupload" title="Keep as soon as a file is dropped?" checked>
+with optional prefix: <input name="prefix" value="" id="prefix" size="7" />
+<input type="submit" name="save" value="Keep the edits" id="save" onclick="htmlssheet_keep();" />
+</form>
+<!-- FIXME: doing this well would requires handling multiple sheets instead of just feeding the TSV to sqlitevis, WIP
+<input type="submit" name="sqlite" value="Query in SQLite" id="query" />
+-->
+Then: 
+<!-- disabled until htmlssheet is uploaded and the file available remotely for ipc -->
+<form id="formexec" enctype="multipart/form-data" action="/statz" method="post">
+<!-- disabled by default to let the chance to alter the prefix -->
+<input type="submit" id="process" name="process" value="Process" />
+<!-- both file names are filled by javascript, show for debug, hidden for normal use -->
+<input id="inputfile" name="inputfile" size="10" type="hidden">
+<input id="outputfile" name="outputfile" size="10" type="hidden">
+<!-- FIXME: support parameters, usecase example: correction to be applied on the plusminus interval in stats.pl -->
+with w=<input id="w_factor" name="w_factor" value="1.0" size="3">
+<!-- disabled until a file has been loaded into htmlssheet -->
+Get spreadsheet:
+<input type="submit" name="xlsx" value="as XLSX" id="export_xlsx" class="export" onclick="htmlssheet_export_xlsx();" disabled />
+<input type="submit" name="tsv" value="as TSV" id="export_tsv" class="export" onclick="htmlssheet_export_tsv();" />
+<div id="htmlssheet"></div>
+<br />
+<script src="/html/js/xspreadsheet.js"></script>
+<script src="/html/js/sheetjs.shim.min.js"></script>
+<script src="/html/js/sheetjs.xlsx.full.min.js"></script>
+<script src="/html/js/glue.sheetjs.xspreadsheet.js"></script>
+<script>
+/* ******************* EARLY INITIALIZATION ******************* */
+
+// first disable the scrollbar
+document.body.style.overflow = 'hidden';
+// then put a x-spreadsheet in htmlssheet
+var htmlssheet_id = document.getElementById('htmlssheet');
+var xspr = x_spreadsheet(htmlssheet_id);
+htmlssheet_id.style.height = (window.innerHeight - 400) + "px";
+htmlssheet_id.style.width = (window.innerWidth - 50) + "px";
+
+/* ******************* HTML SPREADSHEET FUNCTIONS ******************* */
+
+// glue: read JSHEET data and load it into htmlssheet
+function glue_process_wb(wb) {
+    /* convert to x-spreadsheet form */
+    var data = stox(wb);
+    /* update x-spreadsheet */
+    xspr.loadData(data);
+    // Could change .disabled to false to allow export only when some content has been added
+    Array.prototype.forEach.call(document.getElementsByClassName("export"), function(element) {
+    // Use `element` here
+    element.disabled=false;
+    });
+}
+
+// Load a local file into htmlssheet
+// TODO: only working for one file, will have to be fixed to support multiple files and multiple sheets
+function htmlssheet_loadlocal(files) {
+    var f = files[0];
+    if(typeof console !== 'undefined') console.log("htmlssheet_loadlocal of " + f + " at ", new Date());
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var data = e.target.result;
+      glue_process_wb(XLSX.read(data));
+    };
+    reader.readAsArrayBuffer(f);
+  };
+
+// Load a remote url into htmlssheet
+function htmlssheet_loadremote(path_url) {
+   if(typeof console !== 'undefined') console.log("htmlssheet_loadremote of " + path_url + " at ", new Date());
+   fetch(`${path_url}`)
+      .then(function(res) { return res.arrayBuffer(); })
+      .then(function(ab) { glue_process_wb(XLSX.read(ab)); })
+      .then(function(fillpaths) {
+         // .then() above garantees path will only be changed upon success
+         var filename_nolin= path_url.split('/').pop();
+         // Also remove Windows path even if unlikely to ever be needed givel path_url being unixy
+         var filename_only = filename_nolin.split('\\').pop();
+         // Propagate the name to uploadfile: can't just change the value for obscure security reasons
+         var FakeDT = new DataTransfer();
+         // But remove the eventual automatic prefix ..h..m_
+         var filename_noprefix=filename_only.replace(/^\d{2}h\d{2}m_+/, "");
+         var file = new File(["content"], filename_noprefix);
+         FakeDT.items.add(file);
+         document.getElementById('uploadfile').files = FakeDT.files;
+         // Then propose a new prefix
+         var date = new Date();
+         var currentTime = ('0' + date.getHours()).slice(-2) + 'h' + ('0' + date.getMinutes()).slice(-2) + 'm';
+         document.getElementById('prefix').value = currentTime + "_";
+         // And change the hidden file names:
+         document.getElementById('inputfile').value = file.name;
+         document.getElementById('outputfile').value = "stats_"+file.name;
+         // Finally, enable the process button
+         document.getElementById("process").disabled = false;
+         })
+      .catch((error) => {
+         // If anything at all from the above fail, warn about it
+         console.error("Could not load " + path_url + " : " +error);
+         // Then go back to the normal url without parameter
+         if(typeof console !== 'undefined') console.log("initiating reload by htmlssheet_loadremote at ", new Date());
+         if (window.location.href.indexOf("?")>-1) {
+          window.location.href=window.location.href.replace(/\?.*/, "");
+         }
+      })
+}
+
+// Take what's in htmlssheet, then prepare the upload of that instead of the original
+function htmlssheet_keep() {
+   // Make a workbook of what we see
+   var new_wb = xtos(xspr.getData());
+   // Can't directly make a TSV payload out of it: a wb can have more than 1 sheet
+   // So use the first one until multiple sheet support is hadded
+   var firstsheet = new_wb.SheetNames[0];
+   var tsvData = XLSX.utils.sheet_to_csv( new_wb['Sheets'][firstsheet], {FS: "\t"});
+   var uploadfile = document.getElementById('uploadfile').value;
+   var filename_nolin= uploadfile.split('/').pop();
+   var filename_only = filename_nolin.split('\\').pop();
+   var prefix = document.getElementById('prefix').value.replace(/_$/,"");
+   var prefixed_filename;
+   if (typeof prefix !== 'undefined') {
+      if (typeof filename_only !== 'undefined') {
+         var prefixed_filename = prefix + "_" + filename_only;
+      } else { // typeof filename_only
+         var prefixed_filename= prefix;
+      } // typeof filename_only
+   } // typeof prefix
+   // Failsafe
+   if (typeof prefixed_filename == 'undefined') {
+      prefixed_filename="unknown.tsv";
+   }
+   if(typeof console !== 'undefined') console.log("htmlssheet_keep of " + prefixed_filename + " at ", new Date());
+   // Alter the default form to send the TSV payload with the name we want
+   var formUpload = document.getElementById('formupload');
+   formUpload.onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const url = form.action;
+      // For tests of the new upload, can hardcode
+      //var url="http://localhost:8765/mem_upload";
+      htmlssheet_upload_attempt(url, tsvData, prefixed_filename);
+      // It's not desirable to forceload for just a click
+      //var baseloc =window.location.href.replace(/\.html.*/, ".html");
+      //if(typeof console !== 'undefined') console.log("initiating reload by htmlssheet_loadremote for baseloc at ", new Date());
+      //window.location.href = baseloc + "?load=/mem/" + prefixed_filename
+   } // form
+}
+
+// Upload the content given with a HTTP POST multipart
+async function htmlssheet_upload_attempt(url, tsvData, prefixed_filename) {
+   if(typeof console !== 'undefined') console.log("attempt_upload of " + prefixed_filename + " at ", new Date());
+      try {
+         // TODO: add some randomness to the hardcoded boundary
+         var boundaryword = "WebKitFormBoundaryVy2camt7RAUeatMy";
+         var CRLF = "\r\n";
+         var LF = "\n";
+         var requestbody = "----" + boundaryword + CRLF;
+         requestbody+= "Content-Disposition: form-data; name=\"uploadfile\"; filename=\"" + prefixed_filename + "\"" + CRLF;
+         requestbody+= "Content-Type: text/plain; charset=UTF-8" + CRLF;
+         requestbody+= "Content-Transfer-Encoding: Base64" +CRLF +CRLF;
+         requestbody+= btoa(tsvData +LF) + CRLF + CRLF;
+         requestbody+= "----" + boundaryword + "--" +CRLF;
+         const response = await fetch(url, { method: 'POST', headers: { "Content-Type": "multipart/form-data" }, body: requestbody });
+         console.log(response);
+         var oldkept=document.getElementById('kept').innerHTML;
+         // Add a button to the list without reloading, but only if not already there
+         if (oldkept.indexOf("id=\"prefixed_filename\"")==-1) {
+            if(typeof console !== 'undefined') console.log("htmlssheet_upload_attempt doing it own filebutton_add of " + prefixed_filename + " at ", new Date());
+            filebutton_add(prefixed_filename);
+            // Forceloading the uploaded is disturbing and not even necessary
+            //if(typeof console !== 'undefined') console.log("initiating reload by htmlssheet_loadremote for new content at ", new Date());
+            //window.location.href=window.location.href.replace(/\.html.*/, ".html?load=") + prefixed_filename;
+        }
+      } // try
+      catch(error) {
+         console.error(error);
+         //alert("Problem " + e + " posting on " + path_url)
+         // Try go back to the normal url without parameters if they are present:
+         if (window.location.href.indexOf("?")) {
+            // reloading this file will show the new objects, without forcing ?load= which could fail
+            if(typeof console !== 'undefined') console.log("initiating reload by htmlssheet_loadremote for unforcing at ", new Date());
+            window.location.href=window.location.href.replace(/\.html.*/, ".html");
+         } else {
+            if(typeof console !== 'undefined') console.log("initiating reload by htmlssheet_loadremote at ", new Date());
+            window.location.reload('true');
+         }
+      } // catch
+}
+
+// Download the htlmssheet into a XLSX file
+function htmlssheet_export_xlsx() {
+   var new_wb = xtos(xspr.getData());
+   var prefix = document.getElementById('prefix').value;
+   var uploadfile = document.getElementById('uploadfile').value;
+   // Remove Linux path
+   var filename_nolin= uploadfile.split('/').pop();
+   // Remove Windows path (can have C:\fakepath)
+   var filename_only = filename_nolin.split('\\').pop();
+   // Remove The Extension
+   var filename_noext = filename_only.replace(/\.[^/.]+$/, "");
+   // Then use a prefix if present
+   if (typeof prefix == 'undefined') {
+      XLSX.writeFile(new_wb, filename_noext + '.xlsx', {});
+   } else {
+      XLSX.writeFile(new_wb, prefix + '_' + filename_noext + '.xlsx', {});
+  }
+}
+
+// Download the htlmssheet into a TSV file
+function htmlssheet_export_tsv() {
+   var new_wb = xtos(xspr.getData());
+   var prefix = document.getElementById('prefix').value;
+   var uploadfile = document.getElementById('uploadfile').value;
+   // Remove Linux path
+   var filename_nolin= uploadfile.split('/').pop();
+   // Remove Windows path (can have C:\fakepath)
+   var filename_only = filename_nolin.split('\\').pop();
+   // Remove The Extension
+   var filename_noext = filename_only.replace(/\.[^/.]+$/, "");
+   // Then use a prefix if present
+   if (typeof prefix == 'undefined') {
+      XLSX.writeFile(new_wb, filename_noext + '.tsv', {bookType:"csv", FS:"\t"});
+   } else {
+      XLSX.writeFile(new_wb, prefix + '_' + filename_noext + '.tsv', {bookType:"csv", FS:"\t"});
+   }
+}
+
+/* ******************* BUTTONS IN JS TO AVOID RELOADS ******************* */
+
+// Add a button given the mem filename
+function filebutton_add(divid) {
+   if(typeof console !== 'undefined') console.log("filebutton_add of " + divid + " at ", new Date());
+   var oldkept=document.getElementById('kept').innerHTML;
+   var newkept = oldkept.replace("(nothing yet)","") + "<div class=\"rFile\" id=\"" + divid;
+   newkept += "\"><input type=\"submit\" value=\"/mem/" + divid;
+   newkept += "\" textContent=\"" + divid;
+   newkept += "\" class=\"import\" onclick=\"htmlssheet_loadremote(this.value);\" /><a href=\"/mem_delete/" + divid;
+   newkept += "\" onclick=\"filebutton_hide(\'" + divid + "\');\">x</a></div>";
+   document.getElementById('kept').innerHTML = newkept;
+}
+
+// Remove a button given the mem filename
+function filebutton_hide(divid) {
+   if(typeof console !== 'undefined') console.log("filebutton_hide of " + divid + " at ", new Date());
+   // To immediately hide a div when clicked
+   //document.getElementById(divid).style.display = "none";
+   // But it's better to delete the div
+   targetid=document.getElementById(divid)
+   targetid.parentNode.removeChild(targetid)
+   // So we can count of how many rFile we have left: 
+   var rfiles=document.getElementsByClassName("rFile").length;
+   console.log(rfiles + " rfiles left");
+   // And if there's none, display some placeholder until a reload fixes that by processing the magic keyword
+   if (rfiles == 0) {
+      document.getElementById('kept').innerHTML="(nothing)";
+      // Clearing the htmlssheet by loading a dummy \t
+      // could result it dataloss if deleting kept files while entering data
+      // (since deleting keeps what's being shown)
+      // This destructive action should only be done if the user would expect
+      // something to happen immediately upon action
+      // This is likely the case the autoupload was checked:
+      if ( document.getElementById('dropautoupload').checked ) {
+       xspr.loadData("\t");
+      }
+   }
+   // Then if the file isnt what was forced with ?load, nothing to do
+   if (window.location.href.indexOf("?load=/mem/") == -1) {
+      // nothing is forceloaded, no refresh necessary as we removed the button
+      // it would load /mem due to the form action, so we have to prevent that by returning false: like a preventDefault
+      // alert ("this should not reload")
+      return false;
+   } else {
+      // something is forceloaded, may have to refresh
+      if (window.location.href.indexOf("?load=/mem/" + divid) == -1) {
+         //alert ("all good, remove another file that the force loaded one");
+         return false;
+      } else {
+         if(typeof console !== 'undefined') console.log("initiating reload by filebutton_hide at ", new Date());
+           // Otherwise, reload to show the remaining files after removing the ?load part
+           //alert ("you just removed your forceloaded file, a reload is needed to correct the url");
+           var redirect=window.location.href;
+           window.location.href=redirect.replace(/\?.*/, "");
+      } // if indexOf
+   }
+}
+
+/* ******************* HANDLERS ******************* */
+
+function handle_dragover(ev) {
+   ev.stopPropagation();
+   ev.preventDefault();
+   ev.dataTransfer.dropEffect = 'copy';
+}
+
+
+function handle_pick(e) { 
+   htmlssheet_loadlocal(e.target.files);
+}
+
+
+// When the dropped files content has been handled by the glue code, can upload it
+function filesready () {
+   // var uploadfile = document.getElementById('uploadfile').value;
+   var uploadfile = document.getElementById('uploadfile').value;
+   var filename_nolin= uploadfile.split('/').pop();
+   var filename_only = filename_nolin.split('\\').pop();
+   var prefix = document.getElementById('prefix').value.replace(/_$/,"");
+   var prefixed_filename;
+   if (typeof prefix !== 'undefined') {
+      if (typeof filename_only !== 'undefined') {
+         var prefixed_filename = prefix + "_" + filename_only;
+      } else {
+         var prefixed_filename= prefix;
+      } // if typeof filename_only
+   } // if typeof prefix 
+   // Failsafe as a name is required for the upoad
+   if (typeof prefixed_filename == 'undefined') {
+      prefixed_filename="unknown.tsv";
+   }
+   // prepare a download like htmlssheet_keep() would:
+   // Make a workbook of what we see inside htmlssheet
+   // so this will not have to be changed too much to support multiple sheets
+   var new_wb = xtos(xspr.getData());
+   // Cant directly make a TSV payload out of it: a wb can have more than 1 sheet
+   // So use the first one, hoping the name wasnt changed
+   var firstsheet = new_wb.SheetNames[0];
+   var tsvData = XLSX.utils.sheet_to_csv( new_wb['Sheets'][firstsheet], {FS: "\t"});
+   if (typeof tsvData == 'undefined' || tsvData.length <2) {
+      alert ("tsvData seems empty")
+   } // if tsv undefined
+   if (document.getElementById('dropautoupload').checked) {
+      if(typeof console !== 'undefined') console.log("filesready autoupload of " + prefixed_filename + " at ", new Date());
+      if (typeof tsvData == 'undefined' || tsvData.length <2) {
+         alert("Cowardly Refusing to upload an empty file");
+//            xspr.loadData("\t");
+//            tsvData=undefined;
+      } else { // if tsvData
+         // use the form
+         //var url="http://localhost:8765/mem_upload";
+         const url = document.getElementById('formupload').action;
+         if(typeof console !== 'undefined') console.log("filesready calling htmlssheet_upload_attempt at ", new Date());
+         htmlssheet_upload_attempt(url, tsvData, prefixed_filename);
+         // the filebutton_add will done by htmlssheet_upload_attempt
+         alert (tsvData);
+         // Can then enable the process button
+         document.getElementById("process").disabled = false;
+      } // if tsvData
+   } // if dropautoupload checked
+} // filesready
+
+ // FIXME: handle multiple files, with 2 options make new sheets of 1 file, upload as separate files (WIP)
+// callback with a filelist
+function handle_drop(ev) {
+   ev.stopPropagation();
+   ev.preventDefault();
+
+   var filesnbr = ev.dataTransfer.length;
+   var filesdone =[];
+
+   if (ev.dataTransfer.items) {
+      // Use DataTransferItemList interface to access the file(s)
+      [...ev.dataTransfer.items].forEach((item, i) => {
+         // If dropped items aren't files, reject them
+         if (item.kind === 'file') {
+            const file = item.getAsFile();
+            console.log(`… itemfile file[${i}].name = ${file.name}`);
+            glue_process_file (file);
+         } else { // if item.kind file
+            filesnbr--;
+         } // if item.kind file
+      }); // forEach item i
+   } else { // if ev.dataTransfer.itemsa
+      // Use DataTransfer interface to access the file(s)
+      [...ev.dataTransfer.files].forEach((file, i) => {
+         console.log(`… file file[${i}].name = ${file.name}`);
+         glue_process_file (file);
+      }); // forEach file i
+   } // if ev.dataTransfer.items
+
+  function glue_process_file (file) {
+   if(typeof console !== 'undefined') console.log("glue_process_file of " + file.name + " at ", new Date());
+   // glue code: will convert wb data to xspreadsheet data, then load the content inside htmlssheet view
+   // FIXME: this is where multiple files could go on different sheets of one workbook etc.
+   var reader = new FileReader();
+   reader.onload = function(e) {
+    var data = e.target.result;
+    glue_process_wb(XLSX.read(data));
+    // alert("glue_process_file Step 2/2 done: " + filesnbr);
+    // if (!--filesnbr) {
+    //    alert("glue_process_file Step 2/2 done ");
+    // } else {
+    //    alert("glue_process_file Step 2/2: " + filesdone.length " done, " + filesnbr + " left")
+    // }
+    filesready();
+   }; // reader.onload
+   reader.readAsArrayBuffer(file);
+   // can then assign a name to this new thing that will be composed of one or multiple files
+   // To propagate the name to uploadfile: can't just change the value for obscure security reasons
+   //document.getElementById('uploadfile').files = file; // won't work
+   // This is just for show (to the user) and tell (to %mem), as we don't care about the path anymore
+   var FakeDT = new DataTransfer();
+   // But remove the eventual automatic prefix ..h..m_
+   var filename_noprefix=file.name.replace(/^\d{2}h\d{2}m_+/, "");
+   var fakefile = new File(["content"], filename_noprefix);
+   FakeDT.items.add(fakefile);
+   document.getElementById('uploadfile').files = FakeDT.files;
+   // The next 2 ones are just strings, not file objects
+   document.getElementById('inputfile').value = file.name;
+   document.getElementById('outputfile').value = "stats_"+file.name;
+   // Another string is the prefix: set by default but can be changed by the user
+   var date = new Date();
+   var currentTime = ('0' + date.getHours()).slice(-2) + 'h' + ('0' + date.getMinutes()).slice(-2) + 'm';
+   // first, update the "uploadfile" button value to show the name of the currently viewed file,
+   // and the "uploadfile" button value to change the save and export name using the hours and min
+   document.getElementById('prefix').value = currentTime;
+   filesdone.push(file.name);
+   // when done, could invoke handledrop callback with the data
+   // like in https://stackoverflow.com/questions/42886844/wait-until-all-files-are-read-asynchronously-filereader-and-then-run-code
+   // FIXME: but no, as can be seen by the order of the alerts.
+   // if (!--filesnbr) {
+   //    alert("glue_process_file Step 1/2 done ");
+   // } else {
+   //    alert("glue_process_file Step 1/2: " + filesdone.length " done, " + filesnbr + " left")
+   // }
+  } // glue_process_file
+
+}; // function handle_drop
+
+
+/* ******************* LATE INITIALIZATION: CONNECT HANDLERS ******************* */
+
+//var uploadfile = document.getElementById('uploadfile');
+uploadfile.addEventListener('change', handle_pick, false);
+
+drop_zone.addEventListener('dragenter', handle_dragover, false);
+drop_zone.addEventListener('dragover', handle_dragover, false);
+// Event listeners are executed in the order added to an element:
+// first handle_drop populate htmlssheet with the content (one or more sheets)
+drop_zone.addEventListener('drop', handle_drop, false);
+// then filesready could take the content as-is to upload it under the filled uploadfile name
+// FIXME: but I have no idea what I'm doing so it doesn't work like this as handle_drop is not blocking
+// drop_zone.addEventListener('drop', filesready, false);
+
+/* ******************* PARAMETERS TO ALLOW FORCED LOADS ******************* */
+
+// Load a file if requested with ?load=/this/path.tsv
+const params = new URLSearchParams(window.location.search);
+var loadfile=params.get("load")
+if (typeof loadfile !== 'undefined') {
+   if (loadfile) {
+     console.log("Forced load of" + loadfile);
+     htmlssheet_loadremote(loadfile);
+   }
+}
+</script>
+</div>
+<!-- drop_zone extends to the bottom of the page-->
+</html>
